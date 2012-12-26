@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Transform Fragments",
     "author": "nemyax",
-    "version": (0, 1, 20121226),
+    "version": (0, 1, 20121227),
     "blender": (2, 6, 4),
     "location": "",
     "description": "Transform selection by contiguous fragment, as in Wings3D",
@@ -19,7 +19,6 @@ from bpy.props import FloatProperty, EnumProperty
 def orientation(context):
     viewport = context.space_data
     orient = viewport.transform_orientation
-    print(orient)
     if orient in {'GLOBAL', 'GIMBAL', 'NORMAL'}:
         obj_m = context.active_object.matrix_world
         return obj_m.inverted().to_3x3().to_4x4()
@@ -60,36 +59,29 @@ def scale_xyz(factor, axes, orientation):
     elif axes == 'Z':
         vec = orientation * mu.Vector((0, 0, 1))
         return mu.Matrix.Scale(factor, 4, vec)
-    elif axes == 'XY':
-        vec = orientation * mu.Vector((0, 0, 1))
-        m = mu.Matrix.Scale(factor, 4)
-        flatten_m = mu.Matrix.Scale(0, 4, vec)
-        return flatten_m * m
-    elif axes == 'XZ':
-        vec = orientation * mu.Vector((0, 1, 0))
-        m = mu.Matrix.Scale(factor, 4)
-        flatten_m = mu.Matrix.Scale(0, 4, vec)
-        return flatten_m * m
-    elif axes == 'YZ':
-        vec = orientation * mu.Vector((1, 0, 0))
-        m = mu.Matrix.Scale(factor, 4)
-        flatten_m = mu.Matrix.Scale(0, 4, vec)
-        return flatten_m * m
-    elif axes == 'XZ':
-        vec = orientation * mu.Vector((0, 1, 0))
-        m = mu.Matrix.Scale(factor, 4)
-        flatten_m = mu.Matrix.Scale(0, 4, vec)
-        return flatten_m * m
-    else: # 'XYZ':
+    elif axes =='XYZ':
         return mu.Matrix.Scale(factor, 4)
+    else:
+        if axes == 'XY':
+            vec1 = orientation * mu.Vector((1, 0, 0))
+            vec2 = orientation * mu.Vector((0, 1, 0))
+        elif axes == 'XZ':
+            vec1 = orientation * mu.Vector((1, 0, 0))
+            vec2 = orientation * mu.Vector((0, 0, 1))
+        else: # 'YZ'
+            vec1 = orientation * mu.Vector((0, 1, 0))
+            vec2 = orientation * mu.Vector((0, 0, 1))
+        m1 = mu.Matrix.Scale(factor, 4, vec1)
+        m2 = mu.Matrix.Scale(factor, 4, vec2)
+        return m2 * m1
 
 def scale_n(factor, axes, normal):
     if axes == 'Normal':
         return mu.Matrix.Scale(factor, 4, normal)
     else: # 'Normal Radial'
-        m = mu.Matrix.Scale(factor, 4)
-        flatten_m = mu.Matrix.Scale(0, 4, normal)
-        return flatten_m * m
+        uniform_m = mu.Matrix.Scale(factor, 4)
+        compensate_m = mu.Matrix.Scale(1 / factor, 4, normal)
+        return compensate_m * uniform_m
 
 def xform_centers(groups, bm):
     centers = {}
@@ -301,7 +293,6 @@ class ScaleFragments(bpy.types.Operator):
         return (context.mode == 'EDIT_MESH')
 
     def modal(self, context, event):
-        print(self.axes)
         if event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
             reset(context, self.initial_coords)
             return {'CANCELLED'}
@@ -402,9 +393,10 @@ class MoveFragments(bpy.types.Operator):
                 self.frags = group_by_adjacency(sel_edges, bm)
                 self.initial_coords = initial_coords(self.frags, bm)
                 self.normals = average_normals(self.frags, bm)
-                self.params_set = True
                 context.window_manager.modal_handler_add(self)
                 return {'RUNNING_MODAL'}
+            else:
+                return {'CANCELLED'}
         else:
             return {'CANCELLED'}
 

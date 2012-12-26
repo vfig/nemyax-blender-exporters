@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Zaloopok",
     "author": "nemyax",
-    "version": (0, 1, 20121218),
+    "version": (0, 2, 20121227),
     "blender": (2, 6, 4),
     "location": "",
     "description": "Clones of a few selection tools from Wings3D",
@@ -266,6 +266,17 @@ class ZaloopokView3DPanel(bpy.types.Panel):
         subcol3.label("Select Bounded:")
         subcol3.operator("mesh.z_select_bounded_loop", text="Select Loop")
         subcol3.operator("mesh.z_select_bounded_ring", text="Select Ring")
+        comp_sel = context.tool_settings.mesh_select_mode[:]
+        if len(list(filter(lambda x: x, comp_sel))) == 1:
+                subcol4 = col.column(align = True)
+                subcol4.separator()
+                subcol4.label("Convert Selection to:")
+                if not comp_sel[0]:
+                    subcol4.operator("mesh.z_to_verts", text="Vertices")
+                if not comp_sel[1]:
+                    subcol4.operator("mesh.z_to_edges", text="Edges")
+                if not comp_sel[2]:
+                    subcol4.operator("mesh.z_to_faces", text="Faces")
 
 class GrowLoop(bpy.types.Operator):
     bl_idname = "mesh.z_grow_loop"
@@ -339,6 +350,91 @@ class SelectBoundedRing(bpy.types.Operator):
     def execute(self, context):
         return select_bounded_ring(context)
 
+class ToFaces(bpy.types.Operator):
+    bl_idname = "mesh.z_to_faces"
+    bl_label = "Convert vertex or edge selection to face selection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sm = context.tool_settings.mesh_select_mode[:]
+        return (context.mode == 'EDIT_MESH'
+            and (sm == (True, False, False)
+                or sm == (False, True, False)))
+
+    def execute(self, context):
+        bm = bmesh.from_edit_mesh(context.active_object.data)
+        if context.tool_settings.mesh_select_mode[0]:
+            selection = [v for v in bm.verts if v.select]
+        if context.tool_settings.mesh_select_mode[1]:
+            selection = [e for e in bm.edges if e.select]
+        context.tool_settings.mesh_select_mode = (False, False, True)
+        for f in bm.faces:
+            f.select = False
+        target_faces = []
+        [target_faces.extend(s.link_faces[:]) for s in selection]
+        for tf in list(set(target_faces)):
+            tf.select_set(True)
+        context.active_object.data.update()
+        return {'FINISHED'}
+
+class ToEdges(bpy.types.Operator):
+    bl_idname = "mesh.z_to_edges"
+    bl_label = "Convert vertex or face selection to edge selection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sm = context.tool_settings.mesh_select_mode[:]
+        return (context.mode == 'EDIT_MESH'
+            and (sm == (True, False, False)
+                or sm == (False, False, True)))
+
+    def execute(self, context):
+        bm = bmesh.from_edit_mesh(context.active_object.data)
+        target_edges = []
+        if context.tool_settings.mesh_select_mode[0]:
+            selection = [v for v in bm.verts if v.select]
+            [target_edges.extend(s.link_edges[:]) for s in selection]
+        if context.tool_settings.mesh_select_mode[2]:
+            selection = [f for f in bm.faces if f.select]
+            [target_edges.extend(s.edges[:]) for s in selection]
+        context.tool_settings.mesh_select_mode = (False, True, False)
+        for e in bm.edges:
+            e.select = False
+        for te in list(set(target_edges)):
+            te.select_set(True)
+        context.active_object.data.update()
+        return {'FINISHED'}
+
+class ToVerts(bpy.types.Operator):
+    bl_idname = "mesh.z_to_verts"
+    bl_label = "Convert edge or face selection to vertex selection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sm = context.tool_settings.mesh_select_mode[:]
+        return (context.mode == 'EDIT_MESH'
+            and (sm == (False, True, False)
+                or sm == (False, False, True)))
+
+    def execute(self, context):
+        bm = bmesh.from_edit_mesh(context.active_object.data)
+        target_verts = []
+        if context.tool_settings.mesh_select_mode[1]:
+            selection = [e for e in bm.edges if e.select]
+        if context.tool_settings.mesh_select_mode[2]:
+            selection = [f for f in bm.faces if f.select]
+        [target_verts.extend(s.verts[:]) for s in selection]
+        context.tool_settings.mesh_select_mode = (True, False, False)
+        for v in bm.verts:
+            v.select = False
+        for tv in list(set(target_verts)):
+            tv.select_set(True)
+        context.active_object.data.update()
+        return {'FINISHED'}
+
 def register():
     bpy.utils.register_class(ZaloopokView3DPanel)
     bpy.utils.register_class(GrowLoop)
@@ -347,6 +443,9 @@ def register():
     bpy.utils.register_class(ShrinkRing)
     bpy.utils.register_class(SelectBoundedLoop)
     bpy.utils.register_class(SelectBoundedRing)
+    bpy.utils.register_class(ToFaces)
+    bpy.utils.register_class(ToEdges)
+    bpy.utils.register_class(ToVerts)
 
 def unregister():
     bpy.utils.unregister_class(ZaloopokView3DPanel)
@@ -356,6 +455,9 @@ def unregister():
     bpy.utils.unregister_class(ShrinkRing)
     bpy.utils.unregister_class(SelectBoundedLoop)
     bpy.utils.unregister_class(SelectBoundedRing)
+    bpy.utils.unregister_class(ToFaces)
+    bpy.utils.unregister_class(ToEdges)
+    bpy.utils.unregister_class(ToVerts)
 
 if __name__ == "__main__":
     register()
