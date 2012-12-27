@@ -24,6 +24,11 @@ def loop_extension(edge, vert):
     else:
         return
 
+def loop_end(edge):
+    v1, v2 = edge.verts[:]
+    return not loop_extension(edge, v1) \
+        or not loop_extension(edge, v2)
+
 def ring_extension(edge, face):
     if len(face.verts) == 4:
         target_verts = [v for v in face.verts if v not in edge.verts]
@@ -32,6 +37,13 @@ def ring_extension(edge, face):
             target_verts[1] in e.verts][0]
     else:
         return
+
+def ring_end(edge):
+    faces = edge.link_faces[:]
+    border = len(faces) == 1
+    non_manifold = len(faces) > 2
+    dead_ends = map(lambda x: len(x.verts) != 4, faces)
+    return border or non_manifold or any(dead_ends)
 
 def unselected_loop_extensions(edge):
     v1, v2 = edge.verts
@@ -78,25 +90,23 @@ def partial_ring(edge, face):
         part_ring.append(ext)
         if ext == edge:
             break
-        fs = ext.link_faces
-        if len(fs) == 1 or len(fs) > 2:
+        if ring_end(ext):
             break
         else:
-            f = [x for x in fs if x != f][0]
+            f = [x for x in ext.link_faces if x != f][0]
             e = ext
     return part_ring
 
 def entire_ring(edge):
     fs = edge.link_faces
+    ring = [edge]
     if len(fs) and len(fs) < 3:
-        dirs = [partial_ring(edge, f) for f in fs]
-        if len(dirs) == 2 and set(dirs[0]) != set(dirs[1]): # 2-way finite
-            dirs[1].reverse()
-            return dirs[1] + [edge] + dirs[0]
-        else: # infinite or 1-way finite
-            return [edge] + dirs[0]
-    else:
-        return [edge]
+        dirs = [ne for ne in [partial_ring(edge, f) for f in fs] if ne]
+        if dirs:
+            if len(dirs) == 2 and set(dirs[0]) != set(dirs[1]):
+                [ring.insert(0, e) for e in dirs[1]]
+            ring.extend(dirs[0])
+    return ring
 
 def complete_associated_loops(edges):
     loops = []
@@ -202,10 +212,13 @@ def select_bounded_loop(context):
             else:
                 final_gaps = sg
         else: # loop is finite
-            if len(gaps) == 2: # nowhere to go but sideways
-                final_gaps = gaps
+            tails = [g for g in gaps
+                if any(map(lambda x: loop_end(x), g))]
+            nontails = [g for g in gaps if g not in tails]
+            if nontails:
+                final_gaps = nontails
             else:
-                final_gaps = gaps[1:-1]
+                final_gaps = gaps
         for g in final_gaps:
             new_sel.extend(g)
         for e in new_sel:
@@ -229,10 +242,13 @@ def select_bounded_ring(context):
             else:
                 final_gaps = sg
         else: # ring is finite
-            if len(gaps) == 2: # nowhere to go but sideways
-                final_gaps = gaps
+            tails = [g for g in gaps
+                if any(map(lambda x: ring_end(x), g))]
+            nontails = [g for g in gaps if g not in tails]
+            if nontails:
+                final_gaps = nontails
             else:
-                final_gaps = gaps[1:-1]
+                final_gaps = gaps
         for g in final_gaps:
             new_sel.extend(g)
         for e in new_sel:
