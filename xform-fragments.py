@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Transform Fragments",
     "author": "nemyax",
-    "version": (0, 1, 20121227),
+    "version": (0, 1, 20121228),
     "blender": (2, 6, 4),
     "location": "",
     "description": "Transform selection by contiguous fragment, as in Wings3D",
@@ -79,6 +79,8 @@ def scale_n(factor, axes, normal):
     if axes == 'Normal':
         return mu.Matrix.Scale(factor, 4, normal)
     else: # 'Normal Radial'
+        if factor == 0.0:
+            factor = 1e-30
         uniform_m = mu.Matrix.Scale(factor, 4)
         compensate_m = mu.Matrix.Scale(1 / factor, 4, normal)
         return compensate_m * uniform_m
