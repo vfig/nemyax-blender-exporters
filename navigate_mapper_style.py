@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Navigation for mappers",
     "author": "nemyax",
-    "version": (0, 4, 20121117),
-    "blender": (2, 6, 4),
+    "version": (0, 5, 20130417),
+    "blender": (2, 6, 6),
     "location": "",
     "description": "Navigate as in game map editors",
     "warning": "",
@@ -15,10 +15,14 @@ import mathutils as mu
 import math
 from bpy.props import FloatProperty
 
-def move(xyz, context):
-    context.region_data.view_matrix =\
-        context.region_data.view_matrix.inverted() *\
-        mu.Matrix.Translation(xyz)
+def nudge(event, opposites, current_value):
+    if event.value != 'RELEASE':
+        if event.type == opposites[1]:
+            return 1
+        else:
+            return -1
+    else:
+        return 0
 
 class NavigateMapperStyle(bpy.types.Operator):
     """Navigate as in game map editors"""
@@ -39,6 +43,10 @@ class NavigateMapperStyle(bpy.types.Operator):
         default=0.1)
 
     def modal(self, context, event):
+        new_view_matrix = context.region_data.view_matrix
+        left_right = ('A', 'D')
+        fwd_back = ('W', 'S')
+        down_up = ('Z', 'SPACE')
         if event.type == 'MOUSEMOVE':
             new_x = event.mouse_x
             new_y = event.mouse_y
@@ -47,40 +55,31 @@ class NavigateMapperStyle(bpy.types.Operator):
             elevation_delta = math.atan2(y_delta, 1.0)
             azimuth_delta = math.atan2(x_delta, 1.0)
             old_view_matrix = context.region_data.view_matrix
-            view_pos = old_view_matrix.inverted().translation
-            new_view_matrix =\
-                mu.Matrix.Rotation(azimuth_delta, 4, 'Z') *\
-                old_view_matrix.inverted() *\
-                mu.Matrix.Rotation(elevation_delta, 4, 'X').inverted()
-            new_view_matrix.translation = view_pos
-            context.region_data.view_matrix = new_view_matrix
+            r_x = mu.Matrix.Rotation(elevation_delta, 4, 'X')
+            r_z = mu.Matrix.Rotation(azimuth_delta, 4, 'Z').inverted()
+            r_orig = old_view_matrix.to_3x3().to_4x4()
+            new_view_matrix = \
+                r_x * \
+                r_orig * \
+                r_z * \
+                r_orig.inverted() * \
+                old_view_matrix
             self.initial_x = new_x
             self.initial_y = new_y
-            return {'RUNNING_MODAL'}
-        elif event.type in {'W', 'S'}:
-            if self.mov.z == 0 and event.value == 'PRESS':
-                if event.type == 'W': self.mov.z = -self.mov_speed
-                else: self.mov.z = self.mov_speed
-            elif self.mov.z != 0 and event.value == 'RELEASE':
-                self.mov.z = 0
-        elif event.type in {'A', 'D'}:
-            if self.mov.x == 0 and event.value == 'PRESS':
-                if event.type == 'D': self.mov.x = self.mov_speed
-                else: self.mov.x = -self.mov_speed
-            elif self.mov.x != 0 and event.value == 'RELEASE':
-                self.mov.x = 0
-        elif event.type in {'SPACE', 'Z'}:
-            if self.mov.y == 0 and event.value == 'PRESS':
-                if event.type == 'SPACE': self.mov.y = self.mov_speed
-                else: self.mov.y = -self.mov_speed
-            elif self.mov.y != 0 and event.value == 'RELEASE':
-                self.mov.y = 0
+        elif event.type in fwd_back:
+            self.mov.z = nudge(event, fwd_back, self.mov.z)
+        elif event.type in left_right:
+            self.mov.x = nudge(event, left_right, self.mov.x)
+        elif event.type in down_up:
+            self.mov.y = nudge(event, down_up, self.mov.y)
         elif event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
             return {'FINISHED'}
         elif event.type == 'MIDDLEMOUSE' and event.value == 'RELEASE':
             return {'FINISHED'}
-        self.mov.normalize()
-        move(self.mov * self.mov_speed, context)
+        context.region_data.view_matrix = \
+            mu.Matrix.Translation(self.mov * self.mov_speed).inverted() * \
+            new_view_matrix
+        context.region_data.update()
         return {'RUNNING_MODAL'}
 
     def invoke(self, context, event):
@@ -102,5 +101,4 @@ def unregister():
 
 if __name__ == "__main__":
     register()
-
 
