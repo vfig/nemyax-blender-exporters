@@ -15,7 +15,7 @@ import mathutils as mu
 import math
 from bpy.props import FloatProperty
 
-def nudge(event, opposites, current_value):
+def nudge(event, opposites):
     if event.value != 'RELEASE':
         if event.type == opposites[1]:
             return 1
@@ -67,11 +67,11 @@ class NavigateMapperStyle(bpy.types.Operator):
             self.initial_x = new_x
             self.initial_y = new_y
         elif event.type in fwd_back:
-            self.mov.z = nudge(event, fwd_back, self.mov.z)
+            self.mov.z = nudge(event, fwd_back)
         elif event.type in left_right:
-            self.mov.x = nudge(event, left_right, self.mov.x)
+            self.mov.x = nudge(event, left_right)
         elif event.type in down_up:
-            self.mov.y = nudge(event, down_up, self.mov.y)
+            self.mov.y = nudge(event, down_up)
         elif event.type in {'ESC', 'RIGHTMOUSE'} and event.value == 'PRESS':
             return {'FINISHED'}
         elif event.type == 'MIDDLEMOUSE' and event.value == 'RELEASE':
