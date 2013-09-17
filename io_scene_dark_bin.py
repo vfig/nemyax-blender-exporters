@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20130822),
+    "version": (0, 1, 20130917),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -59,13 +59,23 @@ def get_string(bs):
 
 class SubobjectImported(object):
     def __init__(self, bs, faceRefs, faces, materials, vhots):
+        #~ print("how many materials:", len(materials))
         self.name   = get_string(bs[:8])
         self.motion = bs[8]
         self.parm   = unpack('<i', bs[9:13])[0]
+        self.min   = unpack('<f', bs[13:17])[0]
+        self.max   = unpack('<f', bs[17:21])[0]
         self.child  = unpack('<h', bs[69:71])[0]
         self.next   = unpack('<h', bs[71:73])[0]
         self.xform  = get_floats(bs[21:69])
         self.vhots  = vhots
+        #~ print("name:", self.name)
+        #~ print("motion:", self.motion)
+        #~ print("min:", self.min)
+        #~ print("max:", self.max)
+        #~ print("parm:", self.parm)
+        #~ print("child:", self.child)
+        #~ print("next:", self.next)
         faces  = [faces[addr] for addr in faceRefs]
         matMap = {}
         for f in faces:
@@ -231,7 +241,6 @@ def prep_subobjects(subBytes, faceRefs, faces, materials, vhots):
             vhots)
         subs.append(sub)
         index += 1
-        #print("xform:", sub.xform)
         subBytes = subBytes[93:]
     return subs
 
@@ -324,13 +333,6 @@ def make_objects(objectData):
     subobjects, verts, uvs, mats = objectData
     objs = []
     for s in subobjects:
-        #print()
-        #print("name:", s.name)
-        #print("parm:", s.parm)
-        #print("child:", s.child)
-        #print("next:", s.next)
-        #print("motion:", s.motion)
-        #print()
         mesh = make_mesh(s, verts, uvs)
         if bpy.context.active_object:
             bpy.ops.object.mode_set(mode='OBJECT')
@@ -375,11 +377,46 @@ def do_import(fileName):
 ### Export functions
 ###
 
+class CornerExportable(object):
+    def __init__(self, vert, uv, light):
+        self.vert  = vert[:]
+        self.uv    = uv[:]
+        self.light = light[:]
+
 class FaceExportable(object):
-    def __init__(self, verts, uvs, mat):
-        self.binVerts = verts
-        self.binUVs   = uvs
-        self.binMat   = mat
+    def __init__(self, corners, mat, normal):
+        self.corners = corners
+        self.mat     = mat
+        self.normal  = normal[:]
+    def encode(self, index, meshDetails, materials):
+        vertIndexes = []
+        uvIndexes = []
+        lightIndexes = []
+        normalIndex = meshDetails.normalOff +\
+            meshDetails.normals.index(self.normal)
+        for c in self.corners:
+            vertIndexes.append(meshDetails.vertOff +
+                meshDetails.verts.index(c.vert))
+            uvIndexes.append(meshDetails.uvOff +
+                meshDetails.uvs.index(c.uv))
+            lightIndexes.append(meshDetails.lightOff +
+                meshDetails.lights.index(c.light))
+        numVerts = len(vertIndexes)
+        if self.mat:
+            material = materials.index(self.mat) + 1
+        else:
+            material = 1
+        return concat_bytes([
+            pack('<H', index),
+            pack('<H', material),
+            b'\x1b', # 27
+            pack('B', numVerts),
+            pack('H', normalIndex),
+            b'\x00\x00\x80?', # 1.0
+            encode_ushorts(vertIndexes),
+            encode_ushorts(lightIndexes),
+            encode_ushorts(uvIndexes),
+            b'\x00'])
 
 class Hierarchy(object):
     def __init__(self, unordered):
@@ -422,9 +459,6 @@ def strip_wires(bm):
     [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
     [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3]
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
-    return bm
-
-def rip_up(bm, angle): # angle: float() or None
     return bm
 
 def encode(fmt, what):
@@ -552,8 +586,7 @@ def encode_header(geom, offsets):
         geom.names[0],
         b'\x00\x00\x80?', # radius = 1.0 (placeholder)
         b'\x00\x00\x80?', # max poly radius = 1.0 (placeholder)
-        b'\x00\x00\x80?\x00\x00\x80?\x00\x00\x80?', # bbox_max = 1.0 1.0 1.0 (placeholder)
-        b'\x00\x00\x80\xbf\x00\x00\x80\xbf\x00\x00\x80\xbf', # bbox_min = -1.0 -1.0 -1.0 (placeholder)
+        encode_floats(geom.boundBox()),
         bytes(12), # relative centre
         encode_ushorts([
             geom.numFaces,
@@ -582,24 +615,73 @@ def encode_header(geom, offsets):
 def deep_count(deepList):
     return sum([len(i) for i in deepList])
 
-def get_faces(bm, vertsSoFar, uvsSoFar, matSlots):
+def get_verts(faceLists):
     result = []
-    for f in bm.faces:
-        numUVs = len(f.loops)
-        binUVs = [uvsSoFar+i for i in reversed(range(numUVs))]
-        binVerts = [v.index+vertsSoFar for v in reversed(f.verts)]
-        uvsSoFar += numUVs
-        mat = matSlots[f.material_index].material
-        result.append(FaceExportable(binVerts, binUVs, mat))
+    for fl in faceLists:
+        vertSet = set()
+        for f in fl:
+            for c in f.corners:
+                vertSet.add(c.vert)
+        result.append(vertSet)
     return result
 
-def encode_sphere(bbox):
-    xyz1 = mu.Vector(bbox[0][:])
-    xyz2 = mu.Vector(bbox[6][:])
+def get_uvs(faceLists):
+    result = []
+    for fl in faceLists:
+        uvSet = set()
+        for f in fl:
+            for c in f.corners:
+                uvSet.add(c.uv)
+        result.append(uvSet)
+    return result
+
+def get_lights(faceLists):
+    result = []
+    for fl in faceLists:
+        lightSet = set()
+        for f in fl:
+            for c in f.corners:
+                lightSet.add(c.light)
+        result.append(lightSet)
+    return result
+
+def get_normals(faceLists):
+    result = []
+    for fl in faceLists:
+        normalSet = set()
+        for f in fl:
+            normalSet.add(f.normal)
+        result.append(normalSet)
+    return result
+
+def get_faces(bm, matSlots):
+    uvData = bm.loops.layers.uv.verify()
+    [f.normal_update() for f in bm.faces]
+    [v.normal_update() for v in bm.verts]
+    result = []
+    for f in bm.faces:
+        numCorners = len(f.loops)
+        corners = []
+        normal = f.normal
+        for l in reversed(f.loops): # flip normal
+            xyz = tuple(l.vert.co)
+            u, v = l[uvData].uv
+            light = l.vert.normal
+            corners.append(CornerExportable(xyz, (u,1.0-v), light))
+        if matSlots:
+            mat = matSlots[f.material_index].material
+        else:
+            mat = None
+        result.append(FaceExportable(corners, mat, normal))
+    return result
+
+def encode_sphere(bbox): # (localMin,localMax,worldMin,worldMax), all tuples
+    xyz1 = mu.Vector(bbox[0])
+    xyz2 = mu.Vector(bbox[1])
     halfDiag = (xyz2 - xyz1) * 0.5
-    center = xyz1 + halfDiag
+    cx, cy, cz = xyz1 + halfDiag
     radius = halfDiag.magnitude
-    return encode_floats(list(center[:]) + [radius])
+    return encode_floats([cx,cy,cz,radius])
 
 def encode_names(names, length):
     newNames = []
@@ -627,100 +709,123 @@ def encode_material(binName, index):
         bytes(4), # ??? "texture handle or argb"
         bytes(4)]) # ??? "uv/ipal"
 
+class MeshDetails(object):
+    def __init__(self,
+        vertSet, uvSet, normalSet, lightSet,
+        vertOff, uvOff, normalOff, lightOff):
+        self.verts = list(vertSet)
+        self.uvs = list(uvSet)
+        self.normals = list(normalSet)
+        self.lights = list(lightSet)
+        self.vertOff = vertOff
+        self.uvOff = uvOff
+        self.normalOff = normalOff
+        self.lightOff = lightOff
+        
 class GeomConverter(object):
     def __init__(
         self,
-        verts,
-        lights,
-        faces,
-        normals,
-        uvs,
+        faceLists,
         names,
         bboxes,
         hier,
         materials,
         matrices,
         vhots):
-        binFaces = []
-        for mi in range(len(faces)):
-            mesh = faces[mi]
-            faceOffset = deep_count(faces[:mi])
-            binFaces.append([])
+        binFaceLists = []
+        details = []
+        vertSets = get_verts(faceLists)
+        uvSets = get_uvs(faceLists)
+        normalSets = get_normals(faceLists)
+        lightSets = get_lights(faceLists)
+        for mi in range(len(faceLists)):
+            mesh       = list(faceLists[mi])
+            faceOffset = deep_count(faceLists[:mi])
+            meshDetails = MeshDetails(
+                vertSets[mi],
+                uvSets[mi],
+                normalSets[mi],
+                lightSets[mi],
+                deep_count(vertSets[:mi]),
+                deep_count(uvSets[:mi]),
+                deep_count(normalSets[:mi]),
+                deep_count(lightSets[:mi]))
+            details.append(meshDetails)
+            binFaceLists.append([])
             for fi in range(len(mesh)):
                 index = faceOffset + fi
-                binFace = encode_face(mesh[fi], index, materials)
-                binFaces[-1].append(binFace)
-        self.binFaces = binFaces
+                face = mesh[fi]
+                binFace = face.encode(index, meshDetails, materials)
+                binFaceLists[-1].append(binFace)
+        self.binFaceLists = binFaceLists
         spheres = []
         for bb in bboxes:
             spheres.append(encode_sphere(bb))
         self.hier       = hier
         self.names      = encode_names(names, 8)
         self.spheres    = spheres
-        self.verts      = verts    # [[(float(),float(),float())]]
-        self.lights     = lights   # [[(float(),float(),float())]]
-        self.faces      = faces    # [[FaceExportable()]]
-        self.normals    = normals  # [[(float(),float(),float())]]
-        self.uvs        = uvs      # [[(float(),float())]]
+        self.faceLists  = faceLists   # [[FaceExportable()]]
         self.materials  = materials
         self.numVhots   = deep_count(vhots)
-        self.numVerts   = deep_count(verts)
-        self.numFaces   = deep_count(faces)
-        self.numNormals = deep_count(normals)
-        self.numUVs     = deep_count(uvs)
-        self.numLights  = deep_count(lights)
-        self.numMeshes  = len(verts)
+        self.numVerts   = deep_count(vertSets)
+        self.numFaces   = deep_count(faceLists)
+        self.numNormals = deep_count(normalSets)
+        self.numUVs     = deep_count(uvSets)
+        self.numLights  = deep_count(lightSets)
+        self.numMeshes  = len(faceLists)
         self.matrices   = matrices
         self.vhots      = vhots
+        self.details    = details
+        self.bboxes     = bboxes
     def numVertsIn(self, index):
-        return len(self.verts[index])
+        return len(self.details[index].verts)
     def vertOffsetOf(self, index):
-        return deep_count(self.verts[:index])
+        return self.details[index].vertOff
     def numFacesIn(self, index):
-        return len(self.faces[index])
+        return len(self.faceLists[index])
     def numUVsIn(self, index):
-        return len(self.uvs[index])
+        return len(self.details[index].uvs)
     def uvOffsetOf(self, index):
-        return deep_count(self.uvs[:index])
+        return self.details[index].uvOff
     def numLightsIn(self, index):
-        return len(self.lights[index])
+        return len(self.details[index].lights)
+    def lightOffsetOf(self, index):
+        return self.details[index].lightOff
     def vhotOffsetOf(self, index):
         return deep_count(self.vhots[:index])
     def numVhotsIn(self, index):
         return len(self.vhots[index])
-    def lightOffsetOf(self, index):
-        return deep_count(self.lights[:index])
     def numNormalsIn(self, index):
-        return self.numFacesIn(index)
+        return len(self.details[index].normals)
     def normalOffsetOf(self, index):
-        return deep_count(self.normals[:index])
+        return self.details[index].normalOff
     def encodeVerts(self):
         result = b''
-        for m in self.verts:
-            for v in m:
+        for m in self.details:
+            for v in m.verts:
                 result += encode_floats(list(v))
         return result
     def encodeUVs(self):
         result = b''
-        for m in self.uvs:
-            for uv in m:
-                result += encode_floats(list(uv))
+        for m in self.details:
+            for uv in m.uvs:
+                u, v = uv
+                result += encode_floats([u,v])
         return result
     def encodeLights(self):
         result = b''
-        index = 0
-        for m in self.lights:
-            for l in m:
-                #ushort mat;    // material index
-                #ushort point;	// index of of vertex
-                #ulong norm;	   // compacted normal
-                result += concat_bytes([
-                    b'\x01\x00', # not sure about this
-                    pack('<H', index),
-                    pack_light(l)])
-                index += 1
+        for mi in range(len(self.faceLists)):
+            mesh = self.faceLists[mi]
+            meshDetails = self.details[mi]
+            for f in mesh:
+                for c in f.corners:
+                    vertIndex = meshDetails.vertOff +\
+                        meshDetails.verts.index(c.vert)
+                    result += concat_bytes([
+                        b'\x01\x00', # not sure about this; material index
+                        pack('<H', vertIndex),
+                        pack_light(c.light)])
         return result
-                
     def encodeVhots(self):
         chunks = []
         for mi in range(len(self.vhots)):
@@ -734,21 +839,21 @@ class GeomConverter(object):
         return concat_bytes(chunks)
     def encodeNormals(self):
         result = b''
-        for m in self.normals:
-            for n in m:
+        for m in self.details:
+            for n in m.normals:
                 result += encode_floats(list(n))
         return result
     def encodeFaces(self):
         result = b''
-        for bfl in self.binFaces:
+        for bfl in self.binFaceLists:
             for bf in bfl:
                 result += bf
         return result
     def encodeNodes(self):
         result = b''
         addr = 0
-        for bfli in range(len(self.binFaces)):
-            binFaceList = self.binFaces[bfli]
+        for bfli in range(len(self.binFaceLists)):
+            binFaceList = self.binFaceLists[bfli]
             binFaceAddrs = b''
             for bf in binFaceList:
                 binFaceAddrs += pack('<H', addr)
@@ -772,6 +877,15 @@ class GeomConverter(object):
         finalNames = encode_names(names, 16)
         return concat_bytes(
             [encode_material(finalNames[i], i) for i in range(len(names))])
+    def boundBox(self):
+        return [
+            max([b[3][0] for b in self.bboxes]),
+            max([b[3][1] for b in self.bboxes]),
+            max([b[3][2] for b in self.bboxes]),
+            min([b[2][0] for b in self.bboxes]),
+            min([b[2][1] for b in self.bboxes]),
+            min([b[2][2] for b in self.bboxes])]
+        
 
 def build_bin(geom):
     matsChunk   = geom.encodeMaterials()
@@ -805,17 +919,6 @@ def build_bin(geom):
     offsets['nodes']   = nodeOffset
     offsets['junk']    = nodeOffset + len(nodeChunk)
     header = encode_header(geom, offsets)
-    #print("header:", len(header), "\n", header, "\n")
-    #print("subsChunk:", len(subsChunk), "\n", subsChunk, "\n")
-    #print("matsChunk:", len(matsChunk), "\n", matsChunk, "\n")
-    #print("uvChunk:", len(uvChunk), "\n", uvChunk, "\n")
-    #print("vhotChunk:", len(vhotChunk), "\n", vhotChunk, "\n")
-    #print("vertChunk:", len(vertChunk), "\n", vertChunk, "\n")
-    #print("lightChunk:", len(lightChunk), "\n", lightChunk, "\n")
-    #print("normalChunk:", len(normalChunk), "\n", normalChunk, "\n")
-    #print("faceChunk:", len(faceChunk), "\n", faceChunk, "\n")
-    #print("nodeChunk:", len(nodeChunk), "\n", nodeChunk, "\n")
-    #print(sorted(offsets.values()))
     return concat_bytes([
         header,
         subsChunk,
@@ -828,17 +931,29 @@ def build_bin(geom):
         faceChunk,
         nodeChunk])
 
+def get_bbox_data(obj):
+    bbox = obj.bound_box
+    matrix = obj.matrix_world
+    localMin = bbox[0][:]
+    localMax = bbox[6][:]
+    worldCoords = [matrix*mu.Vector(p[:]) for p in bbox]
+    minWX = min([p[0] for p in worldCoords])
+    minWY = min([p[1] for p in worldCoords])
+    minWZ = min([p[2] for p in worldCoords])
+    maxWX = max([p[0] for p in worldCoords])
+    maxWY = max([p[1] for p in worldCoords])
+    maxWZ = max([p[2] for p in worldCoords])
+    worldMin = (minWX,minWY,minWZ)
+    worldMax = (maxWX,maxWY,maxWZ)
+    return (localMin,localMax,worldMin,worldMax)
+
 def do_export(fileName):
     objs = [o for o in bpy.data.objects[:] if
         o.type == 'MESH']
     hier = Hierarchy(objs)
     models = hier.ordered
     vhots     = []
-    verts     = []
-    lights    = []
-    faces     = []
-    normals   = []
-    uvs       = []
+    faceLists = []
     names     = []
     bboxes    = []
     materials = []
@@ -847,46 +962,19 @@ def do_export(fileName):
         bm = bmesh.new()
         bm.from_object(m, bpy.context.scene)
         strip_wires(bm)
-        uvData = bm.loops.layers.uv.verify()
-        faces.append(get_faces(
-            bm,
-            deep_count(verts),
-            deep_count(uvs),
-            m.material_slots))
         vhots.append(
             [o.matrix_local.translation for o in m.children if
                 o.type == 'EMPTY'][:6])
-        verts.append([])
-        lights.append([])
-        normals.append([])
-        uvs.append([])
         names.append(m.name)
-        bboxes.append(m.bound_box)
+        bboxes.append(get_bbox_data(m))
         matrices.append(m.matrix_local)
         matSlots = m.material_slots
         materials.extend([ms.material for ms in matSlots]) # including None
-        corners = []
-        [corners.extend(f.loops[:]) for f in bm.faces]
-        [f.normal_update() for f in bm.faces]
-        [v.normal_update() for v in bm.verts]
-        #for f in bm.faces:
-        #    nx, ny, nz = f.normal
-        #    normals[-1].append((-nx,-ny,-nz))
-        [normals[-1].append(tuple(f.normal[:])) for f in bm.faces]
-        [verts[-1].append(tuple(v.co[:])) for v in bm.verts]
-        [lights[-1].append(tuple(v.normal)) for v in bm.verts]
-        for l in corners:
-            u, v = l[uvData].uv[:]
-            uvs[-1].append((u, 1.0 - v))
-        #[uvs[-1].append(tuple(l[uvData].uv[:])) for l in corners]
+        faceLists.append(get_faces(bm, matSlots))
         bm.free()
     materials = list(set(materials))
     geom = GeomConverter(
-        verts,
-        lights,
-        faces,
-        normals,
-        uvs,
+        faceLists,
         names,
         bboxes,
         hier,
@@ -961,11 +1049,11 @@ def unregister():
 # todo:
 # - range import
 # - range export
-# - 
+# - bounding box export
+# - try treating material indexes as tokens (pig #3 situation)
 #
 # bugs:
-# - 
-# - 
+# - crash when material index > number of materials
 # - 
 # - 
 # - 
