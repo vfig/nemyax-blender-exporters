@@ -69,19 +69,20 @@ class SubobjectImported(object):
         self.next   = unpack('<h', bs[71:73])[0]
         self.xform  = get_floats(bs[21:69])
         self.vhots  = vhots
-        #~ print("name:", self.name)
-        #~ print("motion:", self.motion)
-        #~ print("min:", self.min)
-        #~ print("max:", self.max)
-        #~ print("parm:", self.parm)
-        #~ print("child:", self.child)
-        #~ print("next:", self.next)
+        print("name:", self.name)
+        print("motion:", self.motion)
+        print("min:", self.min)
+        print("max:", self.max)
+        print("parm:", self.parm)
+        print("child:", self.child)
+        print("next:", self.next)
+        print("xform:", self.xform)
         faces  = [faces[addr] for addr in faceRefs]
         matMap = {}
         for f in faces:
             i = f.binMat - 1 # material indexes start with 1!
             matMap[i] = materials[i]
-        self.faces  = faces
+        self.faces  = faces 
         self.matMap = matMap
     def matSlotIndexFor(self, matIndex):
         return list(self.matMap.values()).index(self.matMap[matIndex - 1])
@@ -329,6 +330,14 @@ def make_mesh(subobject, verts, uvs):
     bm.free()
     return mesh
 
+def parent_index(index, subobjects):
+    for i in range(len(subobjects)):
+        if subobjects[i].next == index:
+            return parent_index(i, subobjects)
+        elif subobjects[i].child == index:
+            return i
+    return -1
+
 def make_objects(objectData):
     subobjects, verts, uvs, mats = objectData
     objs = []
@@ -350,11 +359,11 @@ def make_objects(objectData):
         for m in s.matMap.values():
             bpy.ops.object.material_slot_add()
             obj.material_slots[-1].material = m
-        objs.append((obj,s.parm))
-    for i in objs:
-        o, p = i
-        if p > -1 and objs[p][0] != o: # apparently, can be its own parent
-            o.parent = objs[p][0]
+        objs.append(obj)
+    for i in range(len(subobjects)):
+        mum = parent_index(i, subobjects)
+        if mum >= 0:
+            objs[i].parent = objs[mum]
     return {'FINISHED'}
 
 def do_import(fileName):
@@ -448,10 +457,15 @@ class Hierarchy(object):
             return self.hierarchy[index][1][0]
         except IndexError:
             return -1
-    def secondChildOf(self, index):
-        try:
-            return self.hierarchy[index][1][1]
-        except IndexError:
+    def siblingOf(self, index):
+        allSiblings = self.childrenOf(self.parentOf(index))
+        if len(allSiblings) > 1:
+            whereInList = allSiblings.index(index)
+            if whereInList == (len(allSiblings) - 1):
+                return 0
+            else:
+                return allSiblings(whereInList + 1)
+        else:
             return -1
 
 def strip_wires(bm):
@@ -531,10 +545,12 @@ def concat_bytes(bytesList):
 
 def encode_subobject(geom, index):
     name = geom.names[index]
-    if geom.matrices[index] == mu.Matrix.Identity(4):
-        xform = [[0.0] * 4] * 4
-    else:
-        xform = geom.matrices[index]
+    #if geom.matrices[index] == mu.Matrix.Identity(4):
+    #    xform = [[0.0] * 4] * 4
+    #else:
+    #    xform = geom.matrices[index]
+    #xform = [[0.0] * 4] * 4 # temp
+    xform = geom.matrices[index]
     vhotOffset   = geom.vhotOffsetOf(index)
     vertOffset   = geom.vertOffsetOf(index)
     lightOffset  = geom.lightOffsetOf(index)
@@ -545,12 +561,17 @@ def encode_subobject(geom, index):
     numLights  = geom.numLightsIn(index)
     numNormals = geom.numNormalsIn(index)
     numNodes   = 1
+    parm = -1 # temp
+    #if parent == -1:
+    #    parm = index
+    #else:
+    #    parm = parent
     return concat_bytes([
         name,
-        b'\x00',
-        pack('<i', geom.hier.parentOf(index)),
-        b'\x00\x00\x00\x00', # range min
-        b'\x00\x00\x00\x00', # range max
+        b'\x00', # todo: motion
+        pack('<i', parm),
+        b'\x00\x00\x00\x00', # todo: range min
+        b'\x00\x00\x00\x00', # todo: range max
         encode_floats([
             xform[0][0],
             xform[1][0],
@@ -566,7 +587,8 @@ def encode_subobject(geom, index):
             xform[2][3]]),
         encode_shorts([
             geom.hier.firstChildOf(index),
-            geom.hier.secondChildOf(index)]),
+            #~ geom.hier.secondChildOf(index)]),
+            geom.hier.siblingOf(index)]),
         encode_ushorts([
             vhotOffset,
             numVhots,
@@ -777,6 +799,7 @@ class GeomConverter(object):
         self.vhots      = vhots
         self.details    = details
         self.bboxes     = bboxes
+        print("how many meshes:", self.numMeshes)
     def numVertsIn(self, index):
         return len(self.details[index].verts)
     def vertOffsetOf(self, index):
@@ -937,15 +960,53 @@ def get_bbox_data(obj):
     localMin = bbox[0][:]
     localMax = bbox[6][:]
     worldCoords = [matrix*mu.Vector(p[:]) for p in bbox]
-    minWX = min([p[0] for p in worldCoords])
-    minWY = min([p[1] for p in worldCoords])
-    minWZ = min([p[2] for p in worldCoords])
-    maxWX = max([p[0] for p in worldCoords])
-    maxWY = max([p[1] for p in worldCoords])
-    maxWZ = max([p[2] for p in worldCoords])
-    worldMin = (minWX,minWY,minWZ)
-    worldMax = (maxWX,maxWY,maxWZ)
+    xs = [p[0] for p in worldCoords]
+    ys = [p[1] for p in worldCoords]
+    zs = [p[2] for p in worldCoords]
+    worldMin = (min(xs),min(ys),min(zs))
+    worldMax = (max(xs),max(ys),max(zs))
+    print(localMin,localMax,worldMin,worldMax)
     return (localMin,localMax,worldMin,worldMax)
+
+def append_to_bmesh(bm1, obj):
+    matSlotLookup = {}
+    allMats = bpy.data.materials[:]
+    for i in range(len(obj.material_slots)):
+        maybeMat = obj.material_slots[i].material
+        if maybeMat:
+            matSlotLookup[i] = allMats.index(maybeMat)
+    vSoFar = len(bm1.verts)
+    reorient = mu.Matrix()
+    matrix = obj.matrix_world
+    bm2 = bmesh.new()
+    bm2.from_object(obj, bpy.context.scene)
+    strip_wires(bm2)
+    uvData = bm1.loops.layers.uv.active
+    uvDataOrig = bm2.loops.layers.uv.verify()
+    for v in bm2.verts:
+        co = matrix * v.co
+        bm1.verts.new(co)
+        bm1.verts.index_update()
+    for e in bm2.edges:
+        bm1.edges.new([bm1.verts[vSoFar+v.index] for v in e.verts])
+        bm1.edges.index_update()
+    for f in bm2.faces:
+        origMat = f.material_index
+        nf = bm1.faces.new(
+            [bm1.verts[vSoFar+v.index] for v in reversed(f.verts)])
+        for i in range(len(f.loops)):
+            u, v = f.loops[i][uvDataOrig].uv
+            nf.loops[i][uvData].uv[:] = (u,1.0-v)
+        if origMat in matSlotLookup.keys():
+            nf.material_index = matSlotLookup[origMat]
+        bm1.faces.index_update()
+    bm2.free()
+    for el in bm1.faces[:] + bm1.verts[:]:
+        el.normal_update()
+    return bm1
+
+def prep_meshes(objs): # returns bmeshes
+    return
 
 def do_export(fileName):
     objs = [o for o in bpy.data.objects[:] if
@@ -1049,7 +1110,6 @@ def unregister():
 # todo:
 # - range import
 # - range export
-# - bounding box export
 # - try treating material indexes as tokens (pig #3 situation)
 #
 # bugs:
