@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20130924),
+    "version": (0, 1, 20131009),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -22,7 +22,7 @@ from bpy_extras.io_utils import (
     path_reference_mode)
 
 ###
-### Import functions
+### Import
 ###
 
 class FaceImported:
@@ -59,7 +59,6 @@ def get_string(bs):
 
 class SubobjectImported(object):
     def __init__(self, bs, faceRefs, faces, materials, vhots):
-        #~ print("how many materials:", len(materials))
         self.name   = get_string(bs[:8])
         self.motion = bs[8]
         self.parm   = unpack('<i', bs[9:13])[0]
@@ -69,23 +68,25 @@ class SubobjectImported(object):
         self.next   = unpack('<h', bs[71:73])[0]
         self.xform  = get_floats(bs[21:69])
         self.vhots  = vhots
-        print("name:", self.name)
-        print("motion:", self.motion)
-        print("min:", self.min)
-        print("max:", self.max)
-        print("parm:", self.parm)
-        print("child:", self.child)
-        print("next:", self.next)
-        print("xform:", self.xform)
-        faces  = [faces[addr] for addr in faceRefs]
-        matMap = {}
-        for f in faces:
-            i = f.binMat - 1 # material indexes start with 1!
-            matMap[i] = materials[i]
-        self.faces  = faces 
-        self.matMap = matMap
+        # try:
+            # print("name:", self.name)
+        # except UnicodeError:
+            # print("unprintable")
+        # print("motion:", self.motion)
+        # print("min:", self.min)
+        # print("max:", self.max)
+        # print("parm:", self.parm)
+        # print("child:", self.child)
+        # print("next:", self.next)
+        # print("xform:", self.xform)
+        facesHere = [faces[addr] for addr in faceRefs]
+        matsUsed = {}
+        for f in facesHere:
+            matsUsed[f.binMat] = materials[f.binMat]
+        self.faces = facesHere
+        self.matsUsed = matsUsed
     def matSlotIndexFor(self, matIndex):
-        return list(self.matMap.values()).index(self.matMap[matIndex - 1])
+        return list(self.matsUsed.values()).index(self.matsUsed[matIndex])
     def localMatrix(self):
         if all(map(lambda x: x == 0.0, self.xform)):
             return mu.Matrix.Identity(4)
@@ -94,23 +95,20 @@ class SubobjectImported(object):
             matrix[0][0], matrix[1][0], matrix[2][0] = self.xform[:3]
             matrix[0][1], matrix[1][1], matrix[2][1] = self.xform[3:6]
             matrix[0][2], matrix[1][2], matrix[2][2] = self.xform[6:9]
-            #~ matrix[0][0], matrix[0][1], matrix[0][2] = self.xform[:3]
-            #~ matrix[1][0], matrix[1][1], matrix[1][2] = self.xform[3:6]
-            #~ matrix[2][0], matrix[2][1], matrix[2][2] = self.xform[6:9]
             matrix[0][3] = self.xform[9]
             matrix[1][3] = self.xform[10]
             matrix[2][3] = self.xform[11]
             return matrix
 
 def prep_materials(matBytes):
-    materials = []
-    while matBytes:
+    materials = {}
+    while len(matBytes) > 18:
         matName = get_string(matBytes[:16])
-        try:
-            materials.append(bpy.data.materials[matName])
-        except KeyError:
-            materials.append(bpy.data.materials.new(matName))
+        # print("matBytes length:", len(matBytes))
+        matSlot = matBytes[17]
+        materials[matSlot] = matName
         matBytes = matBytes[26:]
+    # print("material dict:", str(materials))
     return materials
 
 def prep_vhots(vhotBytes):
@@ -176,6 +174,7 @@ def prep_faces(faceBytes, version):
         faces[faceAddr] = face
         faceAddr += faceEnd
         faceIndex += 1
+        #~ print("d:", unpack('<f', faceBytes[8:12]))
         faceBytes = faceBytes[faceEnd:]
     return faces
 
@@ -183,9 +182,11 @@ def node_subobject(bs):
     return ([],bs[3:])
 
 def node_vcall(bs):
+    # print("vcall node")
     return ([],bs[19:])
 
 def node_call(bs):
+    # print("call node")
     facesStart = 23
     numFaces1 = unpack('<H', bs[17:19])[0]
     numFaces2 = unpack('<H', bs[21:facesStart])[0]
@@ -194,6 +195,7 @@ def node_call(bs):
     return (faces,bs[facesEnd:])
 
 def node_split(bs):
+    # print("split node")
     facesStart = 31
     numFaces1 = unpack('<H', bs[17:19])[0]
     numFaces2 = unpack('<H', bs[29:facesStart])[0]
@@ -202,6 +204,7 @@ def node_split(bs):
     return (faces,bs[facesEnd:])
 
 def node_raw(bs):
+    # print("raw node")
     facesStart = 19
     numFaces = unpack('<H', bs[17:facesStart])[0]
     facesEnd = facesStart + numFaces * 2
@@ -268,6 +271,7 @@ def parse_bin(binBytes):
         faces,
         materials,
         vhots)
+    # print("parms:", get_ushorts(binBytes[64:66]))
     return (subobjects,verts,uvs,materials)
 
 def build_bmesh(bm, sub, verts):
@@ -348,6 +352,16 @@ def make_objects(objectData):
         obj = bpy.data.objects.new(name=mesh.name, object_data=mesh)
         obj.matrix_local = s.localMatrix()
         bpy.context.scene.objects.link(obj)
+        if s.motion == 1:
+            limits = obj.constraints.new(type='LIMIT_ROTATION')
+            limits.owner_space = 'LOCAL'
+            limits.min_x = s.min
+            limits.max_x = s.max
+        elif s.motion == 2:
+            limits = obj.constraints.new(type='LIMIT_LOCATION')
+            limits.owner_space = 'LOCAL'
+            limits.min_x = s.min
+            limits.max_x = s.max
         for coords in s.vhots:
             vhot = bpy.data.objects.new("vhot", None)
             bpy.context.scene.objects.link(vhot)
@@ -356,9 +370,12 @@ def make_objects(objectData):
         bpy.context.scene.objects.active = obj
         bpy.ops.object.mode_set(mode='EDIT') # initialises UVmap correctly
         mesh.uv_textures.new()
-        for m in s.matMap.values():
+        for m in s.matsUsed.values():
             bpy.ops.object.material_slot_add()
-            obj.material_slots[-1].material = m
+            try:
+                obj.material_slots[-1].material = bpy.data.materials[m]
+            except KeyError:
+                obj.material_slots[-1].material = bpy.data.materials.new(m)
         objs.append(obj)
     for i in range(len(subobjects)):
         mum = parent_index(i, subobjects)
@@ -383,90 +400,249 @@ def do_import(fileName):
     return (msg,result)
 
 ###
-### Export functions
+### Export
 ###
 
-class CornerExportable(object):
-    def __init__(self, vert, uv, light):
-        self.vert  = vert[:]
-        self.uv    = uv[:]
-        self.light = light[:]
+# Classes
 
-class FaceExportable(object):
-    def __init__(self, corners, mat, normal):
-        self.corners = corners
-        self.mat     = mat
-        self.normal  = normal[:]
-    def encode(self, index, meshDetails, materials):
-        vertIndexes = []
-        uvIndexes = []
-        lightIndexes = []
-        normalIndex = meshDetails.normalOff +\
-            meshDetails.normals.index(self.normal)
-        for c in self.corners:
-            vertIndexes.append(meshDetails.vertOff +
-                meshDetails.verts.index(c.vert))
-            uvIndexes.append(meshDetails.uvOff +
-                meshDetails.uvs.index(c.uv))
-            lightIndexes.append(meshDetails.lightOff +
-                meshDetails.lights.index(c.light))
-        numVerts = len(vertIndexes)
-        if self.mat:
-            material = materials.index(self.mat) + 1
-        else:
-            material = 1
-        return concat_bytes([
-            pack('<H', index),
-            pack('<H', material),
-            b'\x1b', # 27
-            pack('B', numVerts),
-            pack('H', normalIndex),
-            b'\x00\x00\x80?', # 1.0
-            encode_ushorts(vertIndexes),
-            encode_ushorts(lightIndexes),
-            encode_ushorts(uvIndexes),
-            b'\x00'])
+class Kinematics(object):
+    def __init__(self, parm, matrix, motionType, min, max, child, sibling):
+        #matrix.transpose()
+        self.parm = parm
+        self.matrix = matrix
+        self.motionType = motionType
+        self.min = min
+        self.max = max
+        self.child = child
+        self.sibling = sibling
 
-class Hierarchy(object):
-    def __init__(self, unordered):
-        objs = [unordered[0]]
-        for o in unordered[1:]:
-            try:
-                where = objs.index(o.parent)
-                objs = objs[:where] + [o] + objs[where:]
-            except ValueError:
-                objs.append(o)
-        hierarchy = [] # (parentIndex,[childIndex])}
-        for obj in objs:
-            index = objs.index(obj)
-            try:
-                pa = objs.index(obj.parent)
-            except ValueError:
-                pa = -1
-            kids = [objs.index(c) for c in obj.children if
-                c in objs]
-            hierarchy.append((pa, kids))
-        self.ordered = objs
-        self.hierarchy = hierarchy
-    def parentOf(self, index):
-        return self.hierarchy[index][0]
-    def childrenOf(self, index):
-        return self.hierarchy[index][1]
-    def firstChildOf(self, index):
-        try:
-            return self.hierarchy[index][1][0]
-        except IndexError:
-            return -1
-    def siblingOf(self, index):
-        allSiblings = self.childrenOf(self.parentOf(index))
-        if len(allSiblings) > 1:
-            whereInList = allSiblings.index(index)
-            if whereInList == (len(allSiblings) - 1):
-                return 0
+class MeshDetails(object):
+    def __init__(self,
+        vertSet, uvSet, normalSet, lightSet,
+        vertOff, uvOff, normalOff, lightOff):
+        self.verts = list(vertSet)
+        self.uvs = list(uvSet)
+        self.normals = list(normalSet)
+        self.lights = list(lightSet)
+        self.vertOff = vertOff
+        self.uvOff = uvOff
+        self.normalOff = normalOff
+        self.lightOff = lightOff
+
+class Model(object):
+    def __init__(self, kinem, meshes, names, materials, vhots):
+        vertSets   = []
+        uvSets     = []
+        normalSets = []
+        lightSets  = []
+        for m in meshes:
+            vertsSoFar = deep_count(vertSets)
+            vs  = set()
+            uvs = set()
+            ls  = set()
+            ns  = set()
+            uvData = m.loops.layers.uv.active
+            for v in m.verts:
+                vs.add(v.co[:])
+            vsLookup = list(vs)
+            for f in m.faces:
+                ns.add(f.normal[:])
+                for c in f.loops:
+                    uvs.add(c[uvData].uv[:])
+                    ls.add((
+                        vertsSoFar + vsLookup.index(c.vert.co[:]),
+                        f.material_index,
+                        c.vert.normal[:]))
+            #print("lights1 ({}):".format(len(ls)), list(ls))
+            ls = prune_lights(ls)
+            #print("lights2 ({}):".format(len(ls)), list(ls))
+            vertSets.append(vs)
+            uvSets.append(uvs)
+            normalSets.append(ns)
+            lightSets.append(ls)
+        for m in meshes:
+            ns = set()
+            for f in m.verts:
+                vs.add(v.co[:])
+            vertSets.append(vs)
+        details = []
+        for mi in range(len(meshes)):
+            details.append(MeshDetails(
+                vertSets[mi],
+                uvSets[mi],
+                normalSets[mi],
+                lightSets[mi],
+                deep_count(vertSets[:mi]),
+                deep_count(uvSets[:mi]),
+                deep_count(normalSets[:mi]),
+                deep_count(lightSets[:mi])))
+        self.meshes     = meshes
+        self.details    = details
+        self.kinem      = kinem
+        self.names      = encode_names(names, 8)
+        self.materials  = materials
+        self.numVhots   = deep_count(vhots)
+        self.vhots      = vhots
+        self.numFaces   = sum([len(m.faces) for m in meshes])
+        self.numVerts   = deep_count(vertSets)
+        self.numNormals = deep_count(normalSets)
+        self.numUVs     = deep_count(uvSets)
+        self.numLights  = deep_count(lightSets)
+        self.numMeshes  = len(meshes)
+    def numVertsIn(self, index):
+        return len(self.details[index].verts)
+    def numFacesIn(self, index):
+        return len(self.faceLists[index])
+    def numUVsIn(self, index):
+        return len(self.details[index].uvs)
+    def numLightsIn(self, index):
+        return len(self.details[index].lights)
+    def numVhotsIn(self, index):
+        return len(self.vhots[index])
+    def numNormalsIn(self, index):
+        return len(self.details[index].normals)
+    def encodeVerts(self):
+        result = b''
+        for m in self.details:
+            for v in m.verts:
+                result += encode_floats(list(v))
+        return result
+    def encodeUVs(self):
+        result = b''
+        for m in self.details:
+            for uv in m.uvs:
+                u, v = uv
+                result += encode_floats([u,v])
+        return result
+    def encodeLights(self):
+        result = b''
+        for mi in range(self.numMeshes):
+            mesh = self.meshes[mi]
+            meshDetails = self.details[mi]
+            allCorners = []
+            [[allCorners.append(c) for c in f.loops] for f in mesh.faces]
+            for l in meshDetails.lights:
+                for c in allCorners:
+                    if l == c.vert.normal[:]:
+                        vertIndex = meshDetails.vertOff +\
+                        meshDetails.verts.index(c.vert.co[:])
+                        break
+                result += concat_bytes([
+                    pack('<H', l[1]),
+                    pack('<H', l[0]),
+                    pack_light(l[2])])
+        return result 
+    def encodeVhots(self):
+        chunks = []
+        for mi in range(len(self.vhots)):
+            currentVhots = self.vhots[mi]
+            offset = deep_count(self.vhots[:mi])
+            for ai in range(len(currentVhots)):
+                coords = list(currentVhots[ai])
+                chunks.append(concat_bytes([
+                    pack('<I', offset + ai),
+                    encode_floats(coords)]))
+        return concat_bytes(chunks)
+    def encodeNormals(self):
+        result = b''
+        for m in self.details:
+            for n in m.normals:
+                result += encode_floats(list(n))
+        return result
+    def encodeFaces(self):
+        binFaceLists = []
+        for mi in range(self.numMeshes):
+            vertOff  = self.details[mi].vertOff
+            uvOff    = self.details[mi].uvOff
+            lightOff = self.details[mi].lightOff
+            faceOff  = sum([len(m.faces) for m in self.meshes[:mi]])
+            verts    = self.details[mi].verts
+            uvs      = self.details[mi].uvs
+            normals  = self.details[mi].normals
+            lights   = self.details[mi].lights
+            mesh     = self.meshes[mi]
+            uvData   = mesh.loops.layers.uv.active
+            binFaceLists.append([])
+            for f in mesh.faces:
+                corners = list(reversed(f.loops)) # flip normal
+                binVerts = [vertOff+verts.index(c.vert.co[:])
+                    for c in corners]
+                binLights = []
+                for c in corners:
+                    for i in range(len(lights)):
+                        l = lights[i]
+                        if (f.material_index,c.vert.normal[:]) == l[1:]:
+                            binLights.append(lightOff + i)
+                            break
+                binUVs = [uvOff+uvs.index(c[uvData].uv[:])
+                    for c in corners]
+                numVerts = len(binVerts)
+                indexBytes  = pack('<H', faceOff + f.index)
+                matBytes    = pack('<H', f.material_index)
+                vertBytes   = encode_ushorts(binVerts)
+                lightBytes  = encode_ushorts(binLights)
+                uvBytes     = encode_ushorts(binUVs)
+                vertCoords  = [c.vert.co[:] for c in corners]
+                normalBytes = pack('<H', normals.index(f.normal[:]))
+                binFaceLists[-1].append(concat_bytes([
+                    indexBytes,
+                    matBytes,
+                    b'\x1b', # 27, 00011011
+                    pack('B', numVerts),
+                    normalBytes,
+                    pack('<f', find_d(f.normal, vertCoords)),
+                    # pack('<f', 100.0),
+                    vertBytes,
+                    lightBytes,
+                    uvBytes,
+                    b'\x00']))
+        return binFaceLists
+    def encodeMaterials(self):
+        names = []
+        for m in self.materials:
+            if m:
+                names.append(m.name)
             else:
-                return allSiblings(whereInList + 1)
-        else:
-            return -1
+                names.append("oh_bugger!.pcx")
+        finalNames = encode_names(names, 16)
+        return concat_bytes(
+            [encode_material(finalNames[i], i) for i in range(len(names))])
+    def boundBox(self):
+        (minX, minY, minZ), (maxX, maxY, maxZ) =\
+            get_local_bbox_data(self.meshes[0])
+        return [maxX, maxY, maxZ, minX, minY, minZ]
+
+def encodeNodes(binFaceLists, model):
+    result = b''
+    addr = 0
+    for bfli in range(len(binFaceLists)):
+        binFaceList = binFaceLists[bfli]
+        sphereBytes = encode_sphere(get_local_bbox_data(model.meshes[bfli]))
+        binFaceAddrs = b''
+        for bf in binFaceList:
+            binFaceAddrs += pack('<H', addr)
+            addr += len(bf)
+        result = concat_bytes([
+            result,
+            b'\x04',
+            pack('<H', bfli),
+            b'\x00',
+            sphereBytes,
+            pack('<H', len(binFaceList)),
+            binFaceAddrs])
+    return result
+
+#define MD_PGON_PRIM_MASK  0x07 00000111
+#define MD_PGON_LIGHT_ON   0x18 00011000
+#define MD_PGON_COLOR_MASK 0x60 01100000
+#define MD_PGON_PRIM_NONE    0  00000000 // no primitive drawn
+#define MD_PGON_PRIM_SOLID   1  00000001 // vcolor lookup
+#define MD_PGON_PRIM_WIRE    2  00000010 // wire
+#define MD_PGON_PRIM_TMAP    3  00000011 // texture map
+#define MD_PGON_COLOR_PAL  0x20  00100000 // palette color
+#define MD_PGON_COLOR_VCOL 0x40  01000000 // vcolor lookup
+
+# Utilities
 
 def strip_wires(bm):
     [bm.verts.remove(v) for v in bm.verts if v.is_wire]
@@ -474,6 +650,23 @@ def strip_wires(bm):
     [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3]
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
     return bm
+
+def prune_lights(ls):
+    lsRaw = list(ls)
+    result = [lsRaw[0]]
+    for rl in lsRaw[1:]:
+        if result[-1][1:] != rl[1:]:
+            result.append(rl)   
+    return set(result)
+
+def concat_bytes(bytesList):
+    result = b''
+    while bytesList:
+        result = bytesList.pop() + result
+    return result
+
+def deep_count(deepList):
+    return sum([len(i) for i in deepList])
 
 def encode(fmt, what):
     return concat_bytes([pack(fmt, i) for i in what])
@@ -499,31 +692,20 @@ def encode_ubytes(ubytes):
 def encode_misc(items):
     return concat_bytes([pack(fmt, i) for (fmt, i) in items])
 
-def encode_face(face, index, materials):
-    verts = face.binVerts
-    numVerts = len(verts)
-    mat = materials.index(face.binMat) + 1
-    indexBytes = pack('<H', index)
-    matBytes = pack('<H', mat)
-    vertBytes = encode_ushorts(verts)
-    lightBytes = vertBytes
-    uvBytes = encode_ushorts(face.binUVs)
-    return concat_bytes([
-        indexBytes,
-        matBytes,
-        b'\x1b', # 27
-        pack('B', numVerts),
-        indexBytes,
-        b'\x00\x00\x80?', # 1.0
-        vertBytes,
-        lightBytes,
-        uvBytes,
-        b'\x00'])
+def find_d(n, vs):
+    nx, ny, nz = n
+    count = len(vs)
+    vx = sum([v[0] for v in vs]) / count
+    vy = sum([v[1] for v in vs]) / count
+    vz = sum([v[2] for v in vs]) / count
+    return -(nx*vx+ny*vy+nz*vz)
+
+# Other functions
 
 def pack_light(xyz):
     lightString = ''
     for f in xyz:
-        if f < 0:
+        if f < -0.0:
             lightString += '1'
         else:
             lightString += '0'
@@ -537,42 +719,27 @@ def pack_light(xyz):
     lightString += '00'
     return pack('<I', int(lightString, 2))
 
-def concat_bytes(bytesList):
-    result = b''
-    while bytesList:
-        result = bytesList.pop() + result
-    return result
-
-def encode_subobject(geom, index):
-    name = geom.names[index]
-    #if geom.matrices[index] == mu.Matrix.Identity(4):
-    #    xform = [[0.0] * 4] * 4
-    #else:
-    #    xform = geom.matrices[index]
-    #xform = [[0.0] * 4] * 4 # temp
-    xform = geom.matrices[index]
-    vhotOffset   = geom.vhotOffsetOf(index)
-    vertOffset   = geom.vertOffsetOf(index)
-    lightOffset  = geom.lightOffsetOf(index)
-    normalOffset = geom.normalOffsetOf(index)
+def encode_subobject(model, index):
+    name = model.names[index]
+    vhotOffset   = deep_count(model.vhots[:index])
+    vertOffset   = model.details[index].vertOff
+    lightOffset  = model.details[index].lightOff
+    normalOffset = model.details[index].normalOff
     nodeOffset   = index
-    numVhots   = geom.numVhotsIn(index)
-    numVerts   = geom.numVertsIn(index)
-    numLights  = geom.numLightsIn(index)
-    numNormals = geom.numNormalsIn(index)
+    numVhots   = model.numVhotsIn(index)
+    numVerts   = model.numVertsIn(index)
+    numLights  = model.numLightsIn(index)
+    numNormals = model.numNormalsIn(index)
     numNodes   = 1
-    parm = -1 # temp
-    #if parent == -1:
-    #    parm = index
-    #else:
-    #    parm = parent
+    kinem      = model.kinem[index]
+    xform      = kinem.matrix
     return concat_bytes([
         name,
-        b'\x00', # todo: motion
-        pack('<i', parm),
-        b'\x00\x00\x00\x00', # todo: range min
-        b'\x00\x00\x00\x00', # todo: range max
+        pack('b', kinem.motionType),
+        pack('<i', kinem.parm),
         encode_floats([
+            kinem.min,
+            kinem.max,
             xform[0][0],
             xform[1][0],
             xform[2][0],
@@ -586,9 +753,8 @@ def encode_subobject(geom, index):
             xform[1][3],
             xform[2][3]]),
         encode_shorts([
-            geom.hier.firstChildOf(index),
-            #~ geom.hier.secondChildOf(index)]),
-            geom.hier.siblingOf(index)]),
+            kinem.child,
+            kinem.sibling]),
         encode_ushorts([
             vhotOffset,
             numVhots,
@@ -601,24 +767,27 @@ def encode_subobject(geom, index):
             nodeOffset,
             numNodes])])
 
-def encode_header(geom, offsets):
+def encode_header(model, offsets):
     junk = offsets['junk']
     return concat_bytes([
         b'LGMD\x04\x00\x00\x00',
-        geom.names[0],
-        b'\x00\x00\x80?', # radius = 1.0 (placeholder)
-        b'\x00\x00\x80?', # max poly radius = 1.0 (placeholder)
-        encode_floats(geom.boundBox()),
-        bytes(12), # relative centre
+        model.names[0],
+        # b'\x00\x00\x80?', # radius = 1.0 (placeholder)
+        pack('<f', 5.0),
+        # b'\x00\x00\x80?', # max poly radius = 1.0 (placeholder)
+        pack('<f', 8.0),
+        encode_floats(model.boundBox()),
+        # bytes(12), # relative centre
+        encode_floats([0.0,0.0,-2.0]),
         encode_ushorts([
-            geom.numFaces,
-            geom.numVerts,
-            0]), # parms
+            model.numFaces,
+            model.numVerts,
+            max(0, model.numMeshes - 1)]), # parms
         encode_ubytes([
-            len(geom.materials),
+            len(model.materials),
             0, # vcalls
-            geom.numVhots,
-            geom.numMeshes]),
+            model.numVhots,
+            model.numMeshes]),
         encode_uints([
             offsets['subs'],
             offsets['mats'],
@@ -634,70 +803,7 @@ def encode_header(geom, offsets):
             junk, # aux material offset
             0])]) # aux material size
 
-def deep_count(deepList):
-    return sum([len(i) for i in deepList])
-
-def get_verts(faceLists):
-    result = []
-    for fl in faceLists:
-        vertSet = set()
-        for f in fl:
-            for c in f.corners:
-                vertSet.add(c.vert)
-        result.append(vertSet)
-    return result
-
-def get_uvs(faceLists):
-    result = []
-    for fl in faceLists:
-        uvSet = set()
-        for f in fl:
-            for c in f.corners:
-                uvSet.add(c.uv)
-        result.append(uvSet)
-    return result
-
-def get_lights(faceLists):
-    result = []
-    for fl in faceLists:
-        lightSet = set()
-        for f in fl:
-            for c in f.corners:
-                lightSet.add(c.light)
-        result.append(lightSet)
-    return result
-
-def get_normals(faceLists):
-    result = []
-    for fl in faceLists:
-        normalSet = set()
-        for f in fl:
-            normalSet.add(f.normal)
-        result.append(normalSet)
-    return result
-
-def get_faces(bm, matSlots):
-    uvData = bm.loops.layers.uv.verify()
-    [f.normal_update() for f in bm.faces]
-    [v.normal_update() for v in bm.verts]
-    result = []
-    for f in bm.faces:
-        numCorners = len(f.loops)
-        corners = []
-        normal = f.normal
-        for l in reversed(f.loops): # flip normal
-            xyz = tuple(l.vert.co)
-            u, v = l[uvData].uv
-            light = l.vert.normal
-            corners.append(CornerExportable(xyz, (u,1.0-v), light))
-        if matSlots:
-            mat = matSlots[f.material_index].material
-        else:
-            mat = None
-        result.append(FaceExportable(corners, mat, normal))
-    return result
-
-def encode_sphere(bbox): # (localMin,localMax,worldMin,worldMax), all tuples
+def encode_sphere(bbox): # (min,max), all tuples
     xyz1 = mu.Vector(bbox[0])
     xyz2 = mu.Vector(bbox[1])
     halfDiag = (xyz2 - xyz1) * 0.5
@@ -727,200 +833,23 @@ def encode_material(binName, index):
     return concat_bytes([
         binName,
         b'\x00', # material type = texture
-        pack('B', index + 1),
+        pack('B', index),
         bytes(4), # ??? "texture handle or argb"
         bytes(4)]) # ??? "uv/ipal"
 
-class MeshDetails(object):
-    def __init__(self,
-        vertSet, uvSet, normalSet, lightSet,
-        vertOff, uvOff, normalOff, lightOff):
-        self.verts = list(vertSet)
-        self.uvs = list(uvSet)
-        self.normals = list(normalSet)
-        self.lights = list(lightSet)
-        self.vertOff = vertOff
-        self.uvOff = uvOff
-        self.normalOff = normalOff
-        self.lightOff = lightOff
-        
-class GeomConverter(object):
-    def __init__(
-        self,
-        faceLists,
-        names,
-        bboxes,
-        hier,
-        materials,
-        matrices,
-        vhots):
-        binFaceLists = []
-        details = []
-        vertSets = get_verts(faceLists)
-        uvSets = get_uvs(faceLists)
-        normalSets = get_normals(faceLists)
-        lightSets = get_lights(faceLists)
-        for mi in range(len(faceLists)):
-            mesh       = list(faceLists[mi])
-            faceOffset = deep_count(faceLists[:mi])
-            meshDetails = MeshDetails(
-                vertSets[mi],
-                uvSets[mi],
-                normalSets[mi],
-                lightSets[mi],
-                deep_count(vertSets[:mi]),
-                deep_count(uvSets[:mi]),
-                deep_count(normalSets[:mi]),
-                deep_count(lightSets[:mi]))
-            details.append(meshDetails)
-            binFaceLists.append([])
-            for fi in range(len(mesh)):
-                index = faceOffset + fi
-                face = mesh[fi]
-                binFace = face.encode(index, meshDetails, materials)
-                binFaceLists[-1].append(binFace)
-        self.binFaceLists = binFaceLists
-        spheres = []
-        for bb in bboxes:
-            spheres.append(encode_sphere(bb))
-        self.hier       = hier
-        self.names      = encode_names(names, 8)
-        self.spheres    = spheres
-        self.faceLists  = faceLists   # [[FaceExportable()]]
-        self.materials  = materials
-        self.numVhots   = deep_count(vhots)
-        self.numVerts   = deep_count(vertSets)
-        self.numFaces   = deep_count(faceLists)
-        self.numNormals = deep_count(normalSets)
-        self.numUVs     = deep_count(uvSets)
-        self.numLights  = deep_count(lightSets)
-        self.numMeshes  = len(faceLists)
-        self.matrices   = matrices
-        self.vhots      = vhots
-        self.details    = details
-        self.bboxes     = bboxes
-        print("how many meshes:", self.numMeshes)
-    def numVertsIn(self, index):
-        return len(self.details[index].verts)
-    def vertOffsetOf(self, index):
-        return self.details[index].vertOff
-    def numFacesIn(self, index):
-        return len(self.faceLists[index])
-    def numUVsIn(self, index):
-        return len(self.details[index].uvs)
-    def uvOffsetOf(self, index):
-        return self.details[index].uvOff
-    def numLightsIn(self, index):
-        return len(self.details[index].lights)
-    def lightOffsetOf(self, index):
-        return self.details[index].lightOff
-    def vhotOffsetOf(self, index):
-        return deep_count(self.vhots[:index])
-    def numVhotsIn(self, index):
-        return len(self.vhots[index])
-    def numNormalsIn(self, index):
-        return len(self.details[index].normals)
-    def normalOffsetOf(self, index):
-        return self.details[index].normalOff
-    def encodeVerts(self):
-        result = b''
-        for m in self.details:
-            for v in m.verts:
-                result += encode_floats(list(v))
-        return result
-    def encodeUVs(self):
-        result = b''
-        for m in self.details:
-            for uv in m.uvs:
-                u, v = uv
-                result += encode_floats([u,v])
-        return result
-    def encodeLights(self):
-        result = b''
-        for mi in range(len(self.faceLists)):
-            mesh = self.faceLists[mi]
-            meshDetails = self.details[mi]
-            for f in mesh:
-                for c in f.corners:
-                    vertIndex = meshDetails.vertOff +\
-                        meshDetails.verts.index(c.vert)
-                    result += concat_bytes([
-                        b'\x01\x00', # not sure about this; material index
-                        pack('<H', vertIndex),
-                        pack_light(c.light)])
-        return result
-    def encodeVhots(self):
-        chunks = []
-        for mi in range(len(self.vhots)):
-            currentVhots = self.vhots[mi]
-            offset = deep_count(self.vhots[:mi])
-            for ai in range(len(currentVhots)):
-                coords = list(currentVhots[ai])
-                chunks.append(concat_bytes([
-                    pack('<I', offset + ai),
-                    encode_floats(coords)]))
-        return concat_bytes(chunks)
-    def encodeNormals(self):
-        result = b''
-        for m in self.details:
-            for n in m.normals:
-                result += encode_floats(list(n))
-        return result
-    def encodeFaces(self):
-        result = b''
-        for bfl in self.binFaceLists:
-            for bf in bfl:
-                result += bf
-        return result
-    def encodeNodes(self):
-        result = b''
-        addr = 0
-        for bfli in range(len(self.binFaceLists)):
-            binFaceList = self.binFaceLists[bfli]
-            binFaceAddrs = b''
-            for bf in binFaceList:
-                binFaceAddrs += pack('<H', addr)
-                addr += len(bf)
-            result = concat_bytes([
-                result,
-                b'\x04',
-                pack('<H', bfli),
-                b'\x00',
-                self.spheres[bfli],
-                pack('<H', len(binFaceList)),
-                binFaceAddrs])
-        return result
-    def encodeMaterials(self):
-        names = []
-        for m in self.materials:
-            if m:
-                names.append(m.name)
-            else:
-                names.append("oh_bugger!.pcx")
-        finalNames = encode_names(names, 16)
-        return concat_bytes(
-            [encode_material(finalNames[i], i) for i in range(len(names))])
-    def boundBox(self):
-        return [
-            max([b[3][0] for b in self.bboxes]),
-            max([b[3][1] for b in self.bboxes]),
-            max([b[3][2] for b in self.bboxes]),
-            min([b[2][0] for b in self.bboxes]),
-            min([b[2][1] for b in self.bboxes]),
-            min([b[2][2] for b in self.bboxes])]
-        
-
-def build_bin(geom):
-    matsChunk   = geom.encodeMaterials()
-    uvChunk     = geom.encodeUVs()
-    vhotChunk   = geom.encodeVhots()
-    vertChunk   = geom.encodeVerts()
-    lightChunk  = geom.encodeLights()
-    normalChunk = geom.encodeNormals()
-    faceChunk   = geom.encodeFaces()
-    nodeChunk   = geom.encodeNodes()
-    subsChunk   = concat_bytes(
-        [encode_subobject(geom, i) for i in range(geom.numMeshes)])
+def build_bin(model):
+    binFaceLists = model.encodeFaces()
+    matsChunk    = model.encodeMaterials()
+    uvChunk      = model.encodeUVs()
+    vhotChunk    = model.encodeVhots()
+    vertChunk    = model.encodeVerts()
+    lightChunk   = model.encodeLights()
+    normalChunk  = model.encodeNormals()
+    nodeChunk    = encodeNodes(binFaceLists, model)
+    faceChunk    = concat_bytes(
+        [concat_bytes(l) for l in binFaceLists])
+    subsChunk    = concat_bytes(
+        [encode_subobject(model, i) for i in range(model.numMeshes)])
     offsets = {}
     subobjOffset   = 122
     materialOffset = subobjOffset   + len(subsChunk)
@@ -941,7 +870,7 @@ def build_bin(geom):
     offsets['faces']   = faceOffset
     offsets['nodes']   = nodeOffset
     offsets['junk']    = nodeOffset + len(nodeChunk)
-    header = encode_header(geom, offsets)
+    header = encode_header(model, offsets)
     return concat_bytes([
         header,
         subsChunk,
@@ -954,46 +883,51 @@ def build_bin(geom):
         faceChunk,
         nodeChunk])
 
-def get_bbox_data(obj):
-    bbox = obj.bound_box
-    matrix = obj.matrix_world
-    localMin = bbox[0][:]
-    localMax = bbox[6][:]
-    worldCoords = [matrix*mu.Vector(p[:]) for p in bbox]
-    xs = [p[0] for p in worldCoords]
-    ys = [p[1] for p in worldCoords]
-    zs = [p[2] for p in worldCoords]
-    worldMin = (min(xs),min(ys),min(zs))
-    worldMax = (max(xs),max(ys),max(zs))
-    print(localMin,localMax,worldMin,worldMax)
-    return (localMin,localMax,worldMin,worldMax)
+def get_local_bbox_data(mesh):
+    xs = [v.co[0] for v in mesh.verts]
+    ys = [v.co[1] for v in mesh.verts]
+    zs = [v.co[2] for v in mesh.verts]
+    return (
+        (min(xs),min(ys),min(zs)),
+        (max(xs),max(ys),max(zs)))
 
-def append_to_bmesh(bm1, obj):
+# def get_bbox_data(obj):
+    # bbox = obj.bound_box
+    # matrix = obj.matrix_world
+    # localMin = bbox[0][:]
+    # localMax = bbox[6][:]
+    # worldCoords = [matrix*mu.Vector(p[:]) for p in bbox]
+    # xs = [p[0] for p in worldCoords]
+    # ys = [p[1] for p in worldCoords]
+    # zs = [p[2] for p in worldCoords]
+    # worldMin = (min(xs),min(ys),min(zs))
+    # worldMax = (max(xs),max(ys),max(zs))
+    # print(localMin,localMax,worldMin,worldMax)
+    # return (localMin,localMax,worldMin,worldMax)
+
+def append_to_bmesh(bm1, obj, matrix, materials):
     matSlotLookup = {}
-    allMats = bpy.data.materials[:]
     for i in range(len(obj.material_slots)):
         maybeMat = obj.material_slots[i].material
         if maybeMat:
-            matSlotLookup[i] = allMats.index(maybeMat)
+            matSlotLookup[i] = materials.index(maybeMat)
     vSoFar = len(bm1.verts)
-    reorient = mu.Matrix()
-    matrix = obj.matrix_world
     bm2 = bmesh.new()
     bm2.from_object(obj, bpy.context.scene)
+    bm2.transform(matrix)
     strip_wires(bm2)
     uvData = bm1.loops.layers.uv.active
     uvDataOrig = bm2.loops.layers.uv.verify()
     for v in bm2.verts:
-        co = matrix * v.co
-        bm1.verts.new(co)
+        bm1.verts.new(v.co)
         bm1.verts.index_update()
-    for e in bm2.edges:
-        bm1.edges.new([bm1.verts[vSoFar+v.index] for v in e.verts])
-        bm1.edges.index_update()
+    # for e in bm2.edges:
+        # bm1.edges.new([bm1.verts[vSoFar+v.index] for v in e.verts])
+        # bm1.edges.index_update()
     for f in bm2.faces:
         origMat = f.material_index
         nf = bm1.faces.new(
-            [bm1.verts[vSoFar+v.index] for v in reversed(f.verts)])
+            [bm1.verts[vSoFar+v.index] for v in f.verts])
         for i in range(len(f.loops)):
             u, v = f.loops[i][uvDataOrig].uv
             nf.loops[i][uvData].uv[:] = (u,1.0-v)
@@ -1001,48 +935,127 @@ def append_to_bmesh(bm1, obj):
             nf.material_index = matSlotLookup[origMat]
         bm1.faces.index_update()
     bm2.free()
-    for el in bm1.faces[:] + bm1.verts[:]:
-        el.normal_update()
+    bm1.normal_update()
     return bm1
 
-def prep_meshes(objs): # returns bmeshes
-    return
+#~ def concat_matrices(obj, matrixSoFar):
+    #~ matrixHere = obj.matrix_local * matrixSoFar
+    #~ parent = obj.parent
+    #~ if not parent:
+        #~ return matrixHere
+    #~ else:
+        #~ return concatMatrices(parent, matrixHere)
+
+def combine_geom(objs, materials):
+    bmeshes = []
+    rootBmesh = bmesh.new()
+    rootBmesh.loops.layers.uv.verify()
+    for rm in objs:
+        append_to_bmesh(rootBmesh, rm, rm.matrix_world, materials)
+    return rootBmesh
+
+def build_hierarchy(root, branches):
+    hier = [[]]
+    [hier.append([]) for x in range(len(branches))]
+    for i in range(len(branches)):
+        m = branches[i]
+        finalIndex = i + 1
+        if m.parent in root:
+            hier[0].append(finalIndex)
+        else:
+            hier[branches.index(m.parent)+1].append(finalIndex)
+    [l.append(-1) for l in hier]
+    return hier
+
+def get_motion(obj):
+    if not obj:
+        motionType = 0
+        min = max = 0.0
+    else:
+        types = ('LIMIT_ROTATION','LIMIT_LOCATION')
+        limits = [c for c in obj.constraints if
+            c.type in types]
+        if limits:
+            c = limits.pop()
+            motionType = types.index(c.type) + 1
+            min = c.min_x
+            max = c.max_x
+        else:
+            motionType = 1
+            min = max = 0.0
+    return (motionType,min,max)
+
+def init_kinematics(objs, hier, matrices):
+    #~ print("hier:", hier)
+    kinem = []
+    for i in range(len(objs)):
+        child = hier[i][0]
+        sibling = -1 # for 0th object
+        for x in hier:
+            if i in x:
+                sibling = x[(x.index(i)+1)]
+                break
+        motionType, min, max = get_motion(objs[i])
+        kinem.append(Kinematics(
+            i - 1,
+            matrices[i],
+            motionType,
+            min,
+            max,
+            child,
+            sibling))
+    return kinem
+
+def prep_meshes(objs, materials):
+    root = [o for o in objs if not o.parent]
+    branches = [o for o in objs if o not in root]
+    bmeshes = [combine_geom(root, materials)]
+    for b in branches:
+        bm = bmesh.new()
+        bm.loops.layers.uv.verify()
+        append_to_bmesh(bm, b, mu.Matrix.Identity(4), materials)
+        bmeshes.append(bm)
+    names = [root[0].name]
+    names.extend([o.name for o in branches])
+    matrices = [mu.Matrix([[0]*4] * 4)]
+    for b in branches:
+        if b.parent in root:
+            matrices.append(b.parent.matrix_world * b.matrix_local)
+        else:
+            matrices.append(b.matrix_local)
+    hier = build_hierarchy(root, branches)
+    kinem = init_kinematics([None] + branches, hier, matrices)
+    return (names,bmeshes,kinem)
 
 def do_export(fileName):
-    objs = [o for o in bpy.data.objects[:] if
-        o.type == 'MESH']
-    hier = Hierarchy(objs)
-    models = hier.ordered
-    vhots     = []
-    faceLists = []
-    names     = []
-    bboxes    = []
-    materials = []
-    matrices  = []
-    for m in models:
-        bm = bmesh.new()
-        bm.from_object(m, bpy.context.scene)
-        strip_wires(bm)
-        vhots.append(
-            [o.matrix_local.translation for o in m.children if
-                o.type == 'EMPTY'][:6])
-        names.append(m.name)
-        bboxes.append(get_bbox_data(m))
-        matrices.append(m.matrix_local)
-        matSlots = m.material_slots
-        materials.extend([ms.material for ms in matSlots]) # including None
-        faceLists.append(get_faces(bm, matSlots))
-        bm.free()
-    materials = list(set(materials))
-    geom = GeomConverter(
-        faceLists,
+    materials = [m for m in bpy.data.materials if 
+        any([m in [ms.material for ms in o.material_slots]
+            for o in bpy.data.objects])]
+    objs = [o for o in bpy.data.objects if o.type == 'MESH']
+    if not objs:
+        return ("Nothing to export.",{'CANCELLED'})
+    names, meshes, kinem = prep_meshes(objs, materials)
+    vhots = [[]]
+    for i in range(len(meshes)):
+        vhots.append([])
+    for e in [o for o in bpy.data.objects if o.type == 'EMPTY']:
+        try:
+            parent = meshes.index(e.parent)
+            if parent == 0:
+                pos = e.matrix_world.translation
+            else:
+                pos = e.matrix_local.translation
+            if len(vhots[parent]) < 6:
+                vhots[parent].append(pos)
+        except ValueError:
+            vhots[0].append(e.matrix_world.translation)
+    model = Model(
+        kinem,
+        meshes,
         names,
-        bboxes,
-        hier,
         materials,
-        matrices,
         vhots)
-    binBytes = build_bin(geom)
+    binBytes = build_bin(model)
     f = open(fileName, 'w+b')
     f.write(binBytes)
     msg = "File \"" + fileName + "\" written successfully."
@@ -1086,6 +1099,8 @@ class ExportDarkBin(bpy.types.Operator, ExportHelper):
     path_mode = path_reference_mode
     def execute(self, context):
         msg, result = do_export(self.filepath)
+        if result == {'CANCELLED'}:
+            self.report({'ERROR'}, msg)
         print(msg)
         return result
 
@@ -1106,15 +1121,3 @@ def unregister():
     bpy.utils.unregister_module(__name__)
     bpy.types.INFO_MT_file_import.remove(menu_func_import_bin)
     bpy.types.INFO_MT_file_export.remove(menu_func_export_bin)
-
-# todo:
-# - range import
-# - range export
-# - try treating material indexes as tokens (pig #3 situation)
-#
-# bugs:
-# - crash when material index > number of materials
-# - 
-# - 
-# - 
-# - 
