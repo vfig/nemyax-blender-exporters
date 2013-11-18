@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20131028),
+    "version": (0, 1, 20131118),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -17,7 +17,7 @@ import struct
 from struct import pack, unpack
 from bpy.props import (
     StringProperty,
-    FloatProperty)
+    BoolProperty)
 from bpy_extras.io_utils import (
     ExportHelper,
     ImportHelper,
@@ -102,14 +102,22 @@ class SubobjectImported(object):
             matrix[2][3] = self.xform[11]
             return matrix
 
-def prep_materials(matBytes):
+def prep_materials(matBytes, numMats):
     materials = {}
-    while len(matBytes) > 18:
-        matName = get_string(matBytes[:16])
-        # print("matBytes length:", len(matBytes))
-        matSlot = matBytes[17]
-        materials[matSlot] = matName
-        matBytes = matBytes[26:]
+    primPos = 0
+    auxPos = 26 * numMats
+    bytesPerAuxChunk = len(matBytes[auxPos:]) // numMats
+    for x in range(numMats):
+        matName = get_string(matBytes[primPos:primPos+16])
+        matSlot = matBytes[primPos+17]
+        clear, bright = get_floats(matBytes[auxPos:auxPos+8])
+        # print("mat name:", matName)
+        # print("mat slot:", matSlot)
+        # print("handle:", unpack('<I', matBytes[18:22])[0])
+        # print("unknown shit:", matBytes[22:26])
+        materials[matSlot] = (matName,clear,bright)
+        primPos += 26
+        auxPos += bytesPerAuxChunk
     # print("material dict:", str(materials))
     return materials
 
@@ -265,6 +273,7 @@ def prep_subobjects(subBytes, faceRefs, faces, materials, vhots):
 
 def parse_bin(binBytes):
     version = unpack('<I', binBytes[4:8])[0]
+    numMats = binBytes[66]
     subobjOffset,\
     matOffset,\
     uvOffset,\
@@ -274,7 +283,7 @@ def parse_bin(binBytes):
     normOffset,\
     faceOffset,\
     nodeOffset = get_uints(binBytes[70:106])
-    materials  = prep_materials(binBytes[matOffset:uvOffset])
+    materials  = prep_materials(binBytes[matOffset:uvOffset], numMats)
     uvs        = prep_uvs(binBytes[uvOffset:vhotOffset])
     vhots      = prep_vhots(binBytes[vhotOffset:vertOffset])
     verts      = prep_verts(binBytes[vertOffset:lightOffset])
@@ -316,7 +325,7 @@ def parse_bin(binBytes):
         # print("amatoff", amatOff)
         # amatSize = unpack('<I', binBytes[118:122])[0]
         # print("amatsize", amatSize)
-        # print("amat data", get_floats(binBytes[amatOff:amatOff+amatSize]))
+        # print("amat data", get_floats(binBytes[amatOff:uvOffset]))
     # print("parms:", get_ushorts(binBytes[64:66]))
     return (subobjects,verts,uvs,materials)
 
@@ -419,9 +428,15 @@ def make_objects(objectData):
         for m in s.matsUsed.values():
             bpy.ops.object.material_slot_add()
             try:
-                obj.material_slots[-1].material = bpy.data.materials[m]
+                existingMat = bpy.data.materials[m[0]]
+                existingMat.translucency = m[1]
+                existingMat.emit = m[2]
+                obj.material_slots[-1].material = existingMat
             except KeyError:
-                obj.material_slots[-1].material = bpy.data.materials.new(m)
+                newMat = bpy.data.materials.new(m[0])
+                newMat.translucency = m[1]
+                newMat.emit = m[2]
+                obj.material_slots[-1].material = newMat
         objs.append(obj)
     for i in range(len(subobjects)):
         mum = parent_index(i, subobjects)
@@ -536,12 +551,11 @@ class Model(object):
         self.numMeshes  = len(meshes)
         self.bbox       = bbox
         matFlags = 0
-        if clear > 0.0:
+        if clear:
             matFlags += 1
-        if bright > 0.0:
+        if bright:
             matFlags += 2
         self.matFlags = matFlags
-        self.matsAuxBytes = encode_floats([clear,bright])
     def numVertsIn(self, index):
         return len(self.details[index].verts)
     def numFacesIn(self, index):
@@ -617,9 +631,7 @@ class Model(object):
             mesh      = self.meshes[mi]
             uvData    = mesh.loops.layers.uv.active
             binFaceLists.append([])
-            meshFaces = mesh.faces
-            # mesh = sort_faces(mesh)
-            # meshFaces = sorted(mesh.faces, key=lambda x: x.index)
+            meshFaces = mesh.faces # todo: bsp
             for f in meshFaces:
                 corners = list(reversed(f.loops)) # flip normal
                 binVerts = [vertOff+verts.index(c.vert.co[:])
@@ -635,6 +647,7 @@ class Model(object):
                     for c in corners]
                 numVerts = len(binVerts)
                 indexBytes  = pack('<H', faceOff + f.index)
+                # matBytes    = pack('<H', f.material_index)
                 matBytes    = pack('<H', f.material_index)
                 vertBytes   = encode_ushorts(binVerts)
                 lightBytes  = encode_ushorts(binLights)
@@ -652,22 +665,29 @@ class Model(object):
                     vertBytes,
                     lightBytes,
                     uvBytes,
-                    b'\x00']))
+                    f.material_index.to_bytes(1, 'little')]))
         return binFaceLists
     def encodeMaterials(self):
         names = []
-        for m in self.materials:
-            if m:
+        if self.materials:
+            for m in self.materials:
                 names.append(m.name)
-            else:
-                names.append("oh_bugger!.pcx")
+        else:
+            names.append("oh_bugger!.pcx")
         finalNames = encode_names(names, 16)
         return concat_bytes(
             [encode_material(finalNames[i], i) for i in range(len(names))])
-    def boundBox(self):
-        (minX, minY, minZ), (maxX, maxY, maxZ) =\
-            get_local_bbox_data(self.meshes[0])
-        return [maxX, maxY, maxZ, minX, minY, minZ]
+    def encodeMatAuxData(self):
+        if self.materials:
+            result = b''
+            for m in self.materials:
+                result += encode_floats([
+                    # m.translucency,
+                    m.translucency,
+                    min([1.0,m.emit])])
+            return result
+        else:
+            return bytes(8)
 
 # Utilities
 
@@ -718,29 +738,6 @@ def encode_ubytes(ubytes):
 
 def encode_misc(items):
     return concat_bytes([pack(fmt, i) for (fmt, i) in items])
-
-def find_centroid(bm):
-    numVerts = len(bm.verts)
-    avgX = [v.co.x for v in bm.verts] / numVerts
-    avgY = [v.co.y for v in bm.verts] / numVerts
-    avgZ = [v.co.z for v in bm.verts] / numVerts
-    return mu.Vector((avgX,avgY,avgZ))
-
-# def find_common_centroid(ms, bms):
-    # xs = []
-    # ys = []
-    # zs = []
-    # for pair in zip(ms, bms):
-        # matrix, bm = pair
-        # coords = [matrix * v.co for v in bm.verts]
-        # xs.extend([c[0] for c in coords])
-        # ys.extend([c[1] for c in coords])
-        # zs.extend([c[2] for c in coords])
-    # count = len(xs)
-    # return mu.Vector((
-        # sum(xs)/count,
-        # sum(ys)/count,
-        # sum(zs)/count))
 
 def find_common_bbox(ms, bms):
     xs = set()
@@ -967,7 +964,7 @@ def encode_header(model, offsets):
             junk - offsets['nodes'], # ??? "model size"
             model.matFlags, # material flags
             offsets['matsAux'],
-            len(model.matsAuxBytes)])]) # aux material size
+            8])]) # bytes per aux material data chunk
 
 def encode_sphere(bbox): # (min,max), all tuples
     xyz1 = mu.Vector(bbox[0])
@@ -1006,7 +1003,7 @@ def encode_material(binName, index):
 def build_bin(model):
     binFaceLists = model.encodeFaces()
     matsChunk    = model.encodeMaterials()
-    matsAuxChunk = model.matsAuxBytes
+    matsAuxChunk = model.encodeMatAuxData()
     uvChunk      = model.encodeUVs()
     vhotChunk    = model.encodeVhots()
     vertChunk    = model.encodeVerts()
@@ -1018,27 +1015,30 @@ def build_bin(model):
     subsChunk    = concat_bytes(
         [encode_subobject(model, i) for i in range(model.numMeshes)])
     offsets = {}
-    subobjOffset   = 122
-    materialOffset = subobjOffset   + len(subsChunk)
-    matAuxOffset   = materialOffset + len(matsChunk)
-    uvOffset       = matAuxOffset   + len(matsAuxChunk)
-    vhotOffset     = uvOffset       + len(uvChunk)
-    vertOffset     = vhotOffset     + len(vhotChunk)
-    lightOffset    = vertOffset     + len(vertChunk)
-    normalOffset   = lightOffset    + len(lightChunk)
-    faceOffset     = normalOffset   + len(normalChunk)
-    nodeOffset     = faceOffset     + len(faceChunk)
-    offsets['subs']    = subobjOffset
-    offsets['mats']    = materialOffset
-    offsets['matsAux'] = matAuxOffset
-    offsets['uvs']     = uvOffset
-    offsets['vhots']   = vhotOffset
-    offsets['verts']   = vertOffset
-    offsets['lights']  = lightOffset
-    offsets['normals'] = normalOffset
-    offsets['faces']   = faceOffset
-    offsets['nodes']   = nodeOffset
-    offsets['junk']    = nodeOffset + len(nodeChunk)
+    def offs(cs):
+        return [sum([len(c) for c in cs[:i+1]]) for i in range(len(cs))]
+    offsets['subs'],\
+    offsets['mats'],\
+    offsets['matsAux'],\
+    offsets['uvs'],\
+    offsets['vhots'],\
+    offsets['verts'],\
+    offsets['lights'],\
+    offsets['normals'],\
+    offsets['faces'],\
+    offsets['nodes'],\
+    offsets['junk'] = offs([
+        bytes(122),
+        subsChunk,
+        matsChunk,
+        matsAuxChunk,
+        uvChunk,
+        vhotChunk,
+        vertChunk,
+        lightChunk,
+        normalChunk,
+        faceChunk,
+        nodeChunk])
     header = encode_header(model, offsets)
     return concat_bytes([
         header,
@@ -1260,16 +1260,12 @@ class ExportDarkBin(bpy.types.Operator, ExportHelper):
         default="*.bin",
         options={'HIDDEN'},
         )
-    clear = FloatProperty(
-        name="Translucency",
-        default=0.0,
-        min=0.0,
-        max=1.0)
-    bright = FloatProperty(
-        name="Emission",
-        default=0.0,
-        min=0.0,
-        max=1.0)
+    clear = BoolProperty(
+        name="Use Translucency",
+        default=True)
+    bright = BoolProperty(
+        name="Use Emission",
+        default=True)
     path_mode = path_reference_mode
     check_extension = True
     path_mode = path_reference_mode
