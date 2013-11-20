@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20131119),
+    "version": (0, 1, 20131120),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -58,7 +58,7 @@ def get_string(bs):
     for b in bs:
         s += chr(b)
     result = ""
-    for c in filter(lambda x: x.isalnum(), s):
+    for c in filter(lambda x: x!='\x00', s):
         result += c
     return result
 
@@ -1094,6 +1094,7 @@ def prep_meshes(objs, materials):
     gen3plus = [o for o in objs if o.parent and not (o.parent in root)]
     gen2meshes = [get_mesh(o, materials) for o in gen2]
     gen3plusMeshes = [get_mesh(o, materials) for o in gen3plus]
+    branches = gen2 + gen3plus
     rootMesh = combine_meshes(
         [get_mesh(o, materials) for o in root],
         [o.matrix_world for o in root])
@@ -1114,10 +1115,19 @@ def prep_meshes(objs, materials):
     for j in range(len(gen3plus)):
         o = gen3plus[j]
         matrices.append(o.matrix_local)
-    branches = gen2 + gen3plus
+    vhots = [[]]
+    for o in root:
+        for vhot in [e for e in o.children if e.type == 'EMPTY']:
+            vhots[-1].append((vhot.name,vhot.matrix_world.translation))
+    for o in branches:
+        vhots.append([])
+        for vhot in [e for e in o.children if e.type == 'EMPTY']:
+            vhots[-1].append((vhot.name,vhot.matrix_local.translation))
+    for i in range(len(vhots)):
+        vhots[i] = [j[1] for j in sorted(vhots[i])] # force the [:6] limit?
     hier = build_hierarchy(root, branches)
     kinem = init_kinematics([None] + branches, hier, matrices)
-    return (names,[rootMesh]+gen2meshes+gen3plusMeshes,kinem,bbox)
+    return (names,[rootMesh]+gen2meshes+gen3plusMeshes,vhots,kinem,bbox)
 
 def do_export(fileName, clear, bright):
     materials = [m for m in bpy.data.materials if 
@@ -1126,22 +1136,7 @@ def do_export(fileName, clear, bright):
     objs = [o for o in bpy.data.objects if o.type == 'MESH']
     if not objs:
         return ("Nothing to export.",{'CANCELLED'})
-    names, meshes, kinem, bbox = prep_meshes(objs, materials)
-    vhots = [[]]
-    for i in range(len(meshes)):
-        vhots.append([])
-    for e in [o for o in bpy.data.objects if o.type == 'EMPTY']:
-        try:
-            parent = meshes.index(e.parent)
-            if parent == 0:
-                pos = e.matrix_world.translation
-            else:
-                pos = e.matrix_local.translation
-                vhots[parent].append((e.name,pos))
-        except ValueError:
-            vhots[0].append((e.name,e.matrix_world.translation))
-    for i in range(len(vhots)):
-        vhots[i] = [j[1] for j in sorted(vhots[i])] # force the [:6] limit?
+    names, meshes, vhots, kinem, bbox = prep_meshes(objs, materials)
     model = Model(
         kinem,
         meshes,
