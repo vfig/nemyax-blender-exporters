@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Zaloopok",
     "author": "nemyax",
-    "version": (0, 2, 20121227),
+    "version": (0, 2, 20131224),
     "blender": (2, 6, 4),
     "location": "",
     "description": "Clones of a few selection tools from Wings3D",
@@ -385,6 +385,7 @@ class ToFaces(bpy.types.Operator):
         if context.tool_settings.mesh_select_mode[1]:
             selection = [e for e in bm.edges if e.select]
         context.tool_settings.mesh_select_mode = (False, False, True)
+        context.space_data.pivot_point = 'INDIVIDUAL_ORIGINS'
         for f in bm.faces:
             f.select = False
         target_faces = []
@@ -416,6 +417,7 @@ class ToEdges(bpy.types.Operator):
             selection = [f for f in bm.faces if f.select]
             [target_edges.extend(s.edges[:]) for s in selection]
         context.tool_settings.mesh_select_mode = (False, True, False)
+        context.space_data.pivot_point = 'INDIVIDUAL_ORIGINS'
         for e in bm.edges:
             e.select = False
         for te in list(set(target_edges)):
@@ -444,6 +446,7 @@ class ToVerts(bpy.types.Operator):
             selection = [f for f in bm.faces if f.select]
         [target_verts.extend(s.verts[:]) for s in selection]
         context.tool_settings.mesh_select_mode = (True, False, False)
+        context.space_data.pivot_point = 'MEDIAN_POINT'
         for v in bm.verts:
             v.select = False
         for tv in list(set(target_verts)):
