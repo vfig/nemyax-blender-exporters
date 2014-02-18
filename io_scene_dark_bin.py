@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20131120),
+    "version": (0, 1, 20140218),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -859,7 +859,6 @@ def encode_subobject(model, index):
             numNodes])])
 
 def encode_header(model, offsets):
-    junk = offsets['junk']
     radius = (
         mu.Vector(model.bbox[max]) -\
         mu.Vector(model.bbox[min])).magnitude * 0.5
@@ -890,7 +889,7 @@ def encode_header(model, offsets):
             offsets['normals'],
             offsets['faces'],
             offsets['nodes'],
-            junk - offsets['nodes'], # ??? "model size"
+            offsets['end'], # ??? "model size"
             model.matFlags, # material flags
             offsets['matsAux'],
             8])]) # bytes per aux material data chunk
@@ -957,7 +956,7 @@ def build_bin(model):
     offsets['normals'],\
     offsets['faces'],\
     offsets['nodes'],\
-    offsets['junk'] = offs([
+    offsets['end'] = offs([
         bytes(122),
         subsChunk,
         matsChunk,
@@ -1019,8 +1018,11 @@ def append_bmesh(bm1, bm2, matrix):
         bm1.verts.index_update()
     for f in bm2.faces:
         origMat = f.material_index
-        nf = bm1.faces.new(
-            [bm1.verts[vSoFar+v.index] for v in f.verts])
+        try:
+            nf = bm1.faces.new(
+                [bm1.verts[vSoFar+v.index] for v in f.verts])
+        except ValueError:
+            continue
         for i in range(len(f.loops)):
             nf.loops[i][uvData].uv = f.loops[i][uvDataOrig].uv
             nf.material_index = f.material_index
