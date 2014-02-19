@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140218),
+    "version": (0, 1, 20140219),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -470,20 +470,21 @@ class Model(object):
                 deep_count(uvSets[:mi]),
                 deep_count(normalSets[:mi]),
                 deep_count(lightSets[:mi])))
-        self.meshes     = meshes
-        self.details    = details
-        self.kinem      = kinem
-        self.names      = encode_names(names, 8)
-        self.materials  = materials
-        self.numVhots   = deep_count(vhots)
-        self.vhots      = vhots
-        self.numFaces   = sum([len(m.faces) for m in meshes])
-        self.numVerts   = deep_count(vertSets)
-        self.numNormals = deep_count(normalSets)
-        self.numUVs     = deep_count(uvSets)
-        self.numLights  = deep_count(lightSets)
-        self.numMeshes  = len(meshes)
-        self.bbox       = bbox
+        self.meshes        = meshes
+        self.details       = details
+        self.kinem         = kinem
+        self.names         = encode_names(names, 8)
+        self.materials     = materials
+        self.numVhots      = deep_count(vhots)
+        self.vhots         = vhots
+        self.numFaces      = sum([len(m.faces) for m in meshes])
+        self.numVerts      = deep_count(vertSets)
+        self.numNormals    = deep_count(normalSets)
+        self.numUVs        = deep_count(uvSets)
+        self.numLights     = deep_count(lightSets)
+        self.numMeshes     = len(meshes)
+        self.bbox          = bbox
+        self.maxPolyRadius = max([max_poly_radius(m) for m in meshes])
         matFlags = 0
         if clear:
             matFlags += 1
@@ -693,6 +694,17 @@ def find_d(n, vs):
     vz = sum([v[2] for v in vs]) / count
     return -(nx*vx+ny*vy+nz*vz)
 
+def max_poly_radius(bm):
+    diam = 0.0
+    for f in bm.faces:
+        dists = set()
+        vs = f.verts
+        for v in vs:
+            for x in vs:
+                dists.add((v.co-x.co).magnitude)
+        diam = max([diam, max(list(dists))])
+    return diam * 0.5
+        
 # Other functions
 
 def encodeNodes(binFaceLists, model):
@@ -866,7 +878,7 @@ def encode_header(model, offsets):
         b'LGMD\x04\x00\x00\x00',
         model.names[0],
         pack('<f', radius),
-        pack('<f', radius), # ??? "max poly radius"
+        pack('<f', model.maxPolyRadius),
         encode_floats(model.bbox[max]),
         encode_floats(model.bbox[min]),
         bytes(12), # relative centre
@@ -889,7 +901,7 @@ def encode_header(model, offsets):
             offsets['normals'],
             offsets['faces'],
             offsets['nodes'],
-            offsets['end'], # ??? "model size"
+            offsets['end'],
             model.matFlags, # material flags
             offsets['matsAux'],
             8])]) # bytes per aux material data chunk
