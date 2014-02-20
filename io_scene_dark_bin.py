@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140219),
+    "version": (0, 1, 20140221),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -454,11 +454,6 @@ class Model(object):
             uvSets.append(uvs)
             normalSets.append(ns)
             lightSets.append(ls)
-        for m in meshes:
-            ns = set()
-            for f in m.verts:
-                vs.add(v.co[:])
-            vertSets.append(vs)
         details = []
         for mi in range(len(meshes)):
             details.append(MeshDetails(
@@ -702,7 +697,7 @@ def max_poly_radius(bm):
         for v in vs:
             for x in vs:
                 dists.add((v.co-x.co).magnitude)
-        diam = max([diam, max(list(dists))])
+        diam = max([diam,max(list(dists))])
     return diam * 0.5
         
 # Other functions
@@ -904,7 +899,11 @@ def encode_header(model, offsets):
             offsets['end'],
             model.matFlags, # material flags
             offsets['matsAux'],
-            8])]) # bytes per aux material data chunk
+            # 8])]) # bytes per aux material data chunk
+            8,
+			offsets['end'], # ??? mesh_off
+			0]), # ??? submesh_list_off
+		b'\x00\x00']) # ??? number of meshes
 
 def encode_sphere(bbox): # (min,max), both tuples
     xyz1 = mu.Vector(bbox[0])
@@ -969,7 +968,7 @@ def build_bin(model):
     offsets['faces'],\
     offsets['nodes'],\
     offsets['end'] = offs([
-        bytes(122),
+        bytes(132),
         subsChunk,
         matsChunk,
         matsAuxChunk,
