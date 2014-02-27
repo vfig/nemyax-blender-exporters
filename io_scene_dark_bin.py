@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140221),
+    "version": (0, 1, 20140227),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -412,12 +412,12 @@ class Kinematics(object):
 
 class MeshDetails(object):
     def __init__(self,
-        vertSet, uvSet, normalSet, lightSet,
+        verts, uvs, normals, lights,
         vertOff, uvOff, normalOff, lightOff):
-        self.verts = list(vertSet)
-        self.uvs = list(uvSet)
-        self.normals = list(normalSet)
-        self.lights = list(lightSet)
+        self.uvs = uvs
+        self.normals = normals
+        self.lights = lights
+        self.verts = verts
         self.vertOff = vertOff
         self.uvOff = uvOff
         self.normalOff = normalOff
@@ -446,10 +446,9 @@ class Model(object):
                 for c in f.loops:
                     uvs.add(c[uvData].uv[:])
                     ls.add((
-                        vertsSoFar + vsLookup.index(c.vert.co[:]),
                         f.material_index,
+                        vertsSoFar + vsLookup.index(c.vert.co[:]),
                         c.vert.normal[:]))
-            ls = prune_lights(ls)
             vertSets.append(vs)
             uvSets.append(uvs)
             normalSets.append(ns)
@@ -457,10 +456,10 @@ class Model(object):
         details = []
         for mi in range(len(meshes)):
             details.append(MeshDetails(
-                vertSets[mi],
-                uvSets[mi],
-                normalSets[mi],
-                lightSets[mi],
+                list(vertSets[mi]),
+                list(uvSets[mi]),
+                list(normalSets[mi]),
+                list(lightSets[mi]),
                 deep_count(vertSets[:mi]),
                 deep_count(uvSets[:mi]),
                 deep_count(normalSets[:mi]),
@@ -516,17 +515,10 @@ class Model(object):
         for mi in range(self.numMeshes):
             mesh = self.meshes[mi]
             meshDetails = self.details[mi]
-            allCorners = []
-            [[allCorners.append(c) for c in f.loops] for f in mesh.faces]
             for l in meshDetails.lights:
-                for c in allCorners:
-                    if l == c.vert.normal[:]:
-                        vertIndex = meshDetails.vertOff +\
-                        meshDetails.verts.index(c.vert.co[:])
-                        break
                 result += concat_bytes([
-                    pack('<H', l[1]),
                     pack('<H', l[0]),
+                    pack('<H', l[1]),
                     pack_light(l[2])])
         return result 
     def encodeVhots(self):
@@ -536,10 +528,8 @@ class Model(object):
             offset = deep_count(self.vhots[:mi])
             for ai in range(len(currentVhots)):
                 coords = list(currentVhots[ai])
-                # print(coords)
                 chunks.append(concat_bytes([
                     pack('<I', offset + ai),
-                    # pack('<I', ai),
                     encode_floats(coords)]))
         return concat_bytes(chunks)
     def encodeNormals(self):
@@ -570,11 +560,10 @@ class Model(object):
                     for c in corners]
                 binLights = []
                 for c in corners:
-                    for i in range(len(lights)):
-                        l = lights[i]
-                        if (f.material_index,c.vert.normal[:]) == l[1:]:
-                            binLights.append(lightOff + i)
-                            break
+                    binLights.append(lights.index((
+                        f.material_index,
+                        vertOff + verts.index(c.vert.co[:]),
+                        c.vert.normal[:])))
                 binUVs = [uvOff+uvs.index(c[uvData].uv[:])
                     for c in corners]
                 numVerts = len(binVerts)
@@ -627,14 +616,6 @@ def strip_wires(bm):
     [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3]
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
     return bm
-
-def prune_lights(ls):
-    lsRaw = list(ls)
-    result = [lsRaw[0]]
-    for rl in lsRaw[1:]:
-        if result[-1][1:] != rl[1:]:
-            result.append(rl)   
-    return set(result)
 
 def concat_bytes(bytesList):
     result = b''
@@ -801,21 +782,17 @@ def encode_raw_node(
         binFaceAddrs])
 
 def pack_light(xyz):
-    lightString = ''
+    result = 0
+    shift = 22
     for f in xyz:
-        if f < -0.0:
-            lightString += '1'
+        if f <= -0.001953125:
+            mask = (1024 + int(f * 512)) << shift
         else:
-            lightString += '0'
-        if abs(f) >= 1.0:
-            lightString += '1'
-            fract = '00000000'
-        else:
-            lightString += '0'
-            fract = bin(int(f * 255)).split("b")[1].zfill(8)
-        lightString += fract
-    lightString += '00'
-    return pack('<I', int(lightString, 2))
+            mask = int(abs(f) * 511) << shift
+        print(bin(mask))
+        result |= mask
+        shift -= 10
+    return pack('<I', result)
 
 def encode_subobject(model, index):
     name = model.names[index]
@@ -899,11 +876,10 @@ def encode_header(model, offsets):
             offsets['end'],
             model.matFlags, # material flags
             offsets['matsAux'],
-            # 8])]) # bytes per aux material data chunk
-            8,
-			offsets['end'], # ??? mesh_off
-			0]), # ??? submesh_list_off
-		b'\x00\x00']) # ??? number of meshes
+            8, # bytes per aux material data chunk
+            offsets['end'], # ??? mesh_off
+            0]), # ??? submesh_list_off
+        b'\x00\x00']) # ??? number of meshes
 
 def encode_sphere(bbox): # (min,max), both tuples
     xyz1 = mu.Vector(bbox[0])
@@ -945,7 +921,6 @@ def build_bin(model):
     matsAuxChunk = model.encodeMatAuxData()
     uvChunk      = model.encodeUVs()
     vhotChunk    = model.encodeVhots()
-    # print("size of vhot chunk:", len(vhotChunk))
     vertChunk    = model.encodeVerts()
     lightChunk   = model.encodeLights()
     normalChunk  = model.encodeNormals()
