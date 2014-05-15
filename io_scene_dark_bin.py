@@ -781,7 +781,7 @@ def encode_raw_node(
         pack('<H', len(binFaceList)),
         binFaceAddrs])
 
-        def pack_light(xyz):
+def pack_light(xyz):
     result = 0
     shift = 22
     for f in xyz:
