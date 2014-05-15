@@ -781,12 +781,12 @@ def encode_raw_node(
         pack('<H', len(binFaceList)),
         binFaceAddrs])
 
-def pack_light(xyz):
+        def pack_light(xyz):
     result = 0
     shift = 22
     for f in xyz:
-        sign = int(f < 0) * 512
-        val = int(abs(f) * 256)
+        val = int(f * 256)
+        sign = int(val < 0) * 1024
         result |= (sign + val) << shift
         shift -= 10
     return pack('<I', result)
