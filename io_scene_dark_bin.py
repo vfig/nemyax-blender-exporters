@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140227),
+    "version": (0, 1, 20140515),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -560,7 +560,7 @@ class Model(object):
                     for c in corners]
                 binLights = []
                 for c in corners:
-                    binLights.append(lights.index((
+                    binLights.append(lightOff + lights.index((
                         f.material_index,
                         vertOff + verts.index(c.vert.co[:]),
                         c.vert.normal[:])))
@@ -785,12 +785,9 @@ def pack_light(xyz):
     result = 0
     shift = 22
     for f in xyz:
-        if f <= -0.001953125:
-            mask = (1024 + int(f * 512)) << shift
-        else:
-            mask = int(abs(f) * 511) << shift
-        print(bin(mask))
-        result |= mask
+        sign = int(f < 0) * 512
+        val = int(abs(f) * 256)
+        result |= (sign + val) << shift
         shift -= 10
     return pack('<I', result)
 
@@ -1083,6 +1080,12 @@ def prep_meshes(objs, materials):
     gen2meshes = [get_mesh(o, materials) for o in gen2]
     gen3plusMeshes = [get_mesh(o, materials) for o in gen3plus]
     branches = gen2 + gen3plus
+    branchMeshes = gen2meshes + gen3plusMeshes
+    # experiment: world normals for non-root
+    # for (bm, o) in zip(branchMeshes,branches):
+        # for v in bm.verts:
+            # v.normal = v.normal * o.matrix_world.to_3x3()
+    # end experiment
     rootMesh = combine_meshes(
         [get_mesh(o, materials) for o in root],
         [o.matrix_world for o in root])
@@ -1115,7 +1118,7 @@ def prep_meshes(objs, materials):
         vhots[i] = [j[1] for j in sorted(vhots[i])] # force the [:6] limit?
     hier = build_hierarchy(root, branches)
     kinem = init_kinematics([None] + branches, hier, matrices)
-    return (names,[rootMesh]+gen2meshes+gen3plusMeshes,vhots,kinem,bbox)
+    return (names,[rootMesh]+branchMeshes,vhots,kinem,bbox)
 
 def do_export(fileName, clear, bright):
     materials = [m for m in bpy.data.materials if 
