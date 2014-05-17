@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140515),
+    "version": (0, 1, 20140516),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -1081,11 +1081,6 @@ def prep_meshes(objs, materials):
     gen3plusMeshes = [get_mesh(o, materials) for o in gen3plus]
     branches = gen2 + gen3plus
     branchMeshes = gen2meshes + gen3plusMeshes
-    # experiment: world normals for non-root
-    # for (bm, o) in zip(branchMeshes,branches):
-        # for v in bm.verts:
-            # v.normal = v.normal * o.matrix_world.to_3x3()
-    # end experiment
     rootMesh = combine_meshes(
         [get_mesh(o, materials) for o in root],
         [o.matrix_world for o in root])
@@ -1109,7 +1104,8 @@ def prep_meshes(objs, materials):
     vhots = [[]]
     for o in root:
         for vhot in [e for e in o.children if e.type == 'EMPTY']:
-            vhots[-1].append((vhot.name,vhot.matrix_world.translation))
+            mtx = originShift * vhot.matrix_world.translation
+            vhots[-1].append((vhot.name,mtx))
     for o in branches:
         vhots.append([])
         for vhot in [e for e in o.children if e.type == 'EMPTY']:
