@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140516),
+    "version": (0, 1, 20140527),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -74,7 +74,6 @@ class SubobjectImported(object):
         self.xform  = get_floats(bs[21:69])
         curVhotsStart, numCurVhots = get_ushorts(bs[73:77])
         self.vhots  = vhots[curVhotsStart:curVhotsStart+numCurVhots]
-        # print("current vhots:", self.vhots)
         facesHere = [faces[addr] for addr in faceRefs]
         matsUsed = {}
         for f in facesHere:
@@ -96,7 +95,7 @@ class SubobjectImported(object):
             matrix[2][3] = self.xform[11]
             return matrix
 
-def prep_materials(matBytes, numMats):
+def prep_materials1(matBytes, numMats):
     materials = {}
     primPos = 0
     auxPos = 26 * numMats
@@ -110,6 +109,30 @@ def prep_materials(matBytes, numMats):
         auxPos += bytesPerAuxChunk
     return materials
 
+def prep_materials(matBytes, numMats):
+    materials = {}
+    stage1 = []
+    stage2 = []
+    for _ in range(numMats):
+        matName = get_string(matBytes[:16])
+        matSlot = matBytes[17]
+        stage1.append((matSlot,matName))
+        matBytes = matBytes[26:]
+    if matBytes: # if there's aux data
+        auxChunkSize = len(matBytes) // numMats
+        for _ in range(numMats):
+            clear, bright = get_floats(matBytes[:8])
+            stage2.append((clear,bright))
+            matBytes = matBytes[auxChunkSize:]
+    else:
+        for _ in range(numMats):
+            stage2.append((0.0,0.0))
+    for i in range(numMats):
+        s, n = stage1[i]
+        c, b = stage2[i]
+        materials[s] = (n,c,b)
+    return materials
+
 def prep_vhots(vhotBytes):
     result = []
     while len(vhotBytes):
@@ -117,7 +140,6 @@ def prep_vhots(vhotBytes):
             unpack('<I', vhotBytes[:4])[0],
             list(get_floats(vhotBytes[4:16]))))
         vhotBytes = vhotBytes[16:]
-    # print("all vhots:", result)
     return result
 
 def prep_verts(vertBytes):
@@ -351,7 +373,6 @@ def make_objects(objectData):
             limits.max_x = s.max
         for v in s.vhots:
             vhotName = s.name + "-vhot-" + str(v[0])
-            # print(vhotName)
             vhot = bpy.data.objects.new(vhotName, None)
             bpy.context.scene.objects.link(vhot)
             vhot.parent = obj
@@ -785,7 +806,7 @@ def pack_light(xyz):
     result = 0
     shift = 22
     for f in xyz:
-        val = int(f * 256)
+        val = round(f * 256)
         sign = int(val < 0) * 1024
         result |= (sign + val) << shift
         shift -= 10
