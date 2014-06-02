@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140527),
+    "version": (0, 1, 20140602),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -94,20 +94,6 @@ class SubobjectImported(object):
             matrix[1][3] = self.xform[10]
             matrix[2][3] = self.xform[11]
             return matrix
-
-def prep_materials1(matBytes, numMats):
-    materials = {}
-    primPos = 0
-    auxPos = 26 * numMats
-    bytesPerAuxChunk = len(matBytes[auxPos:]) // numMats
-    for x in range(numMats):
-        matName = get_string(matBytes[primPos:primPos+16])
-        matSlot = matBytes[primPos+17]
-        clear, bright = get_floats(matBytes[auxPos:auxPos+8])
-        materials[matSlot] = (matName,clear,bright)
-        primPos += 26
-        auxPos += bytesPerAuxChunk
-    return materials
 
 def prep_materials(matBytes, numMats):
     materials = {}
@@ -259,6 +245,8 @@ def prep_subobjects(subBytes, faceRefs, faces, materials, vhots):
 
 def parse_bin(binBytes):
     version = unpack('<I', binBytes[4:8])[0]
+    bbox = get_floats(binBytes[24:48])
+    print(bbox)
     numMats = binBytes[66]
     subobjOffset,\
     matOffset,\
@@ -281,7 +269,7 @@ def parse_bin(binBytes):
         faces,
         materials,
         vhots)
-    return (subobjects,verts,uvs,materials)
+    return (bbox,subobjects,verts,uvs,materials)
 
 def build_bmesh(bm, sub, verts):
     faces = sub.faces
@@ -299,7 +287,7 @@ def build_bmesh(bm, sub, verts):
             f.bmeshVerts = bmVerts
         except ValueError:
             extraVerts = []
-            for oldIndex in f.binVerts:
+            for oldIndex in reversed(f.binVerts):
                 sameCoords = aka(oldIndex, verts)[1][1]
                 ev = bm.verts.new(sameCoords)
                 bm.verts.index_update()
@@ -351,13 +339,24 @@ def parent_index(index, subobjects):
             return i
     return -1
 
+def make_bbox(coords):
+    bm = bmesh.new()
+    v1 = bm.verts.new(coords[:3])
+    v2 = bm.verts.new(coords[3:])
+    e = bm.edges.new((v1, v2))
+    mesh = bpy.data.meshes.new("bbox")
+    bm.to_mesh(mesh)
+    bm.free()
+    bbox = bpy.data.objects.new(name="bbox", object_data=mesh)
+    bbox.draw_type = 'BOUNDS'
+    bpy.context.scene.objects.link(bbox)
+    return bbox
+
 def make_objects(objectData):
-    subobjects, verts, uvs, mats = objectData
+    bbox, subobjects, verts, uvs, mats = objectData
     objs = []
     for s in subobjects:
         mesh = make_mesh(s, verts, uvs)
-        if bpy.context.active_object:
-            bpy.ops.object.mode_set(mode='OBJECT')
         obj = bpy.data.objects.new(name=mesh.name, object_data=mesh)
         obj.matrix_local = s.localMatrix()
         bpy.context.scene.objects.link(obj)
@@ -397,6 +396,7 @@ def make_objects(objectData):
         mum = parent_index(i, subobjects)
         if mum >= 0:
             objs[i].parent = objs[mum]
+    make_bbox(bbox)
     return {'FINISHED'}
 
 def do_import(fileName):
@@ -877,7 +877,7 @@ def encode_header(model, offsets):
             model.numVerts,
             max(0, model.numMeshes - 1)]), # parms
         encode_ubytes([
-            len(model.materials),
+            max(1, len(model.materials)), # can't be 0
             0, # vcalls
             model.numVhots,
             model.numMeshes]),
@@ -1049,10 +1049,10 @@ def build_hierarchy(root, branches):
     for i in range(len(branches)):
         m = branches[i]
         finalIndex = i + 1
-        if m.parent in root:
-            hier[0].append(finalIndex)
-        else:
+        if m.parent in branches:
             hier[branches.index(m.parent)+1].append(finalIndex)
+        else:
+            hier[0].append(finalIndex)
     [l.append(-1) for l in hier]
     return hier
 
@@ -1095,9 +1095,15 @@ def init_kinematics(objs, hier, matrices):
     return kinem
 
 def prep_meshes(objs, materials):
-    root = [o for o in objs if not o.parent]
-    gen2 = [o for o in objs if o.parent in root]
-    gen3plus = [o for o in objs if o.parent and not (o.parent in root)]
+    customBboxes = [o for o in objs if o.name.lower().startswith("bbox")]
+    for bb in customBboxes:
+        objs.remove(bb)
+    root = [o for o in objs if o.data.polygons and not (o.parent in objs)]
+    gen2 = [o for o in objs if o.data.polygons and o.parent in root]
+    gen3plus = [o for o in objs if
+        o.data.polygons and
+        o.parent in objs and
+        not (o.parent in root)]
     gen2meshes = [get_mesh(o, materials) for o in gen2]
     gen3plusMeshes = [get_mesh(o, materials) for o in gen3plus]
     branches = gen2 + gen3plus
@@ -1105,15 +1111,24 @@ def prep_meshes(objs, materials):
     rootMesh = combine_meshes(
         [get_mesh(o, materials) for o in root],
         [o.matrix_world for o in root])
-    bbox = find_common_bbox(
+    realBbox = find_common_bbox(
         [mu.Matrix.Identity(4)] + [o.matrix_world for o in gen2+gen3plus],
         [rootMesh] + gen2meshes + gen3plusMeshes)
+    originShift = mu.Matrix.Translation(
+        (mu.Vector(realBbox[max]) + mu.Vector(realBbox[min])) * -0.5)
+    bbox = {
+        min:tuple(originShift * mu.Vector(realBbox[min])),
+        max:tuple(originShift * mu.Vector(realBbox[max]))}
+    if customBboxes:
+        bbm = customBboxes[0].matrix_world
+        bmax = originShift * bbm * mu.Vector(customBboxes[0].bound_box[6])
+        bmin = originShift * bbm * mu.Vector(customBboxes[0].bound_box[0])
+        print(bmax, bmin)
+        bbox = {min:tuple(bmin),max:tuple(bmax)}
     names = [root[0].name]
     names.extend([o.name for o in gen2])
     names.extend([o.name for o in gen3plus])
     matrices = [mu.Matrix([[0]*4] * 4)]
-    originShift = mu.Matrix.Translation(
-        (mu.Vector(bbox[max]) + mu.Vector(bbox[min])) * -0.5)
     rootMesh.transform(originShift)
     for i in range(len(gen2)):
         o = gen2[i]
@@ -1138,10 +1153,10 @@ def prep_meshes(objs, materials):
     return (names,[rootMesh]+branchMeshes,vhots,kinem,bbox)
 
 def do_export(fileName, clear, bright):
-    materials = [m for m in bpy.data.materials if 
+    materials = [m for m in bpy.data.materials if
         any([m in [ms.material for ms in o.material_slots]
             for o in bpy.data.objects])]
-    objs = [o for o in bpy.data.objects if o.type == 'MESH']
+    objs = [o for o in bpy.data.objects if o.type == 'MESH' and not o.hide]
     if not objs:
         return ("Nothing to export.",{'CANCELLED'})
     names, meshes, vhots, kinem, bbox = prep_meshes(objs, materials)
