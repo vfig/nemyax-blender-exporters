@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140602),
+    "version": (0, 1, 20140603),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -1002,7 +1002,6 @@ def get_mesh(obj, materials): # and tweak materials
             matSlotLookup[i] = materials.index(maybeMat)
     bm = bmesh.new()
     bm.from_object(obj, bpy.context.scene)
-    strip_wires(bm)
     uvData = bm.loops.layers.uv.verify()
     for f in bm.faces:
         origMat = f.material_index
@@ -1150,7 +1149,10 @@ def prep_meshes(objs, materials):
         vhots[i] = [j[1] for j in sorted(vhots[i])] # force the [:6] limit?
     hier = build_hierarchy(root, branches)
     kinem = init_kinematics([None] + branches, hier, matrices)
-    return (names,[rootMesh]+branchMeshes,vhots,kinem,bbox)
+    meshes = [rootMesh]+branchMeshes
+    for bm in meshes:
+        strip_wires(bm)
+    return (names,meshes,vhots,kinem,bbox)
 
 def do_export(fileName, clear, bright):
     materials = [m for m in bpy.data.materials if
