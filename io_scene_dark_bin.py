@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140603),
+    "version": (0, 1, 20140704),
     "blender": (2, 6, 8),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -246,7 +246,6 @@ def prep_subobjects(subBytes, faceRefs, faces, materials, vhots):
 def parse_bin(binBytes):
     version = unpack('<I', binBytes[4:8])[0]
     bbox = get_floats(binBytes[24:48])
-    print(bbox)
     numMats = binBytes[66]
     subobjOffset,\
     matOffset,\
@@ -632,7 +631,7 @@ class Model(object):
 # Utilities
 
 def strip_wires(bm):
-    [bm.verts.remove(v) for v in bm.verts if v.is_wire]
+    [bm.verts.remove(v) for v in bm.verts if v.is_wire or not v.link_faces]
     [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
     [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3]
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
@@ -1002,6 +1001,7 @@ def get_mesh(obj, materials): # and tweak materials
             matSlotLookup[i] = materials.index(maybeMat)
     bm = bmesh.new()
     bm.from_object(obj, bpy.context.scene)
+    strip_wires(bm) # goodbye, box tweak hack
     uvData = bm.loops.layers.uv.verify()
     for f in bm.faces:
         origMat = f.material_index
@@ -1093,16 +1093,32 @@ def init_kinematics(objs, hier, matrices):
             sibling))
     return kinem
 
-def prep_meshes(objs, materials):
+def categorize_objs(objs):
     customBboxes = [o for o in objs if o.name.lower().startswith("bbox")]
-    for bb in customBboxes:
-        objs.remove(bb)
+    bbox = None
+    if customBboxes:
+        bo = customBboxes[0]
+        bm = bo.matrix_world
+        bmin = bm * mu.Vector(bo.bound_box[0])
+        bmax = bm * mu.Vector(bo.bound_box[6])
+        bbox = {min:tuple(bmin),max:tuple(bmax)}
+    for b in customBboxes:
+        objs.remove(b)
     root = [o for o in objs if o.data.polygons and not (o.parent in objs)]
     gen2 = [o for o in objs if o.data.polygons and o.parent in root]
     gen3plus = [o for o in objs if
         o.data.polygons and
         o.parent in objs and
         not (o.parent in root)]
+    return (bbox,root,gen2,gen3plus)
+
+def shift_box(boxData, matrix):
+    return {
+        min:tuple(matrix * mu.Vector(boxData[min])),
+        max:tuple(matrix * mu.Vector(boxData[max]))}
+
+def prep_meshes(allObjs, materials, worldOrigin):
+    bbox, root, gen2, gen3plus = categorize_objs(allObjs)
     gen2meshes = [get_mesh(o, materials) for o in gen2]
     gen3plusMeshes = [get_mesh(o, materials) for o in gen3plus]
     branches = gen2 + gen3plus
@@ -1111,19 +1127,15 @@ def prep_meshes(objs, materials):
         [get_mesh(o, materials) for o in root],
         [o.matrix_world for o in root])
     realBbox = find_common_bbox(
-        [mu.Matrix.Identity(4)] + [o.matrix_world for o in gen2+gen3plus],
-        [rootMesh] + gen2meshes + gen3plusMeshes)
-    originShift = mu.Matrix.Translation(
-        (mu.Vector(realBbox[max]) + mu.Vector(realBbox[min])) * -0.5)
-    bbox = {
-        min:tuple(originShift * mu.Vector(realBbox[min])),
-        max:tuple(originShift * mu.Vector(realBbox[max]))}
-    if customBboxes:
-        bbm = customBboxes[0].matrix_world
-        bmax = originShift * bbm * mu.Vector(customBboxes[0].bound_box[6])
-        bmin = originShift * bbm * mu.Vector(customBboxes[0].bound_box[0])
-        print(bmax, bmin)
-        bbox = {min:tuple(bmin),max:tuple(bmax)}
+        [mu.Matrix.Identity(4)] + [o.matrix_world for o in branches],
+        [rootMesh] + branchMeshes)
+    if not bbox:
+        bbox = realBbox
+    if worldOrigin:
+        originShift = mu.Matrix.Identity(4)
+    else:
+        originShift = mu.Matrix.Translation(
+            (mu.Vector(realBbox[max]) + mu.Vector(realBbox[min])) * -0.5)
     names = [root[0].name]
     names.extend([o.name for o in gen2])
     names.extend([o.name for o in gen3plus])
@@ -1131,7 +1143,6 @@ def prep_meshes(objs, materials):
     rootMesh.transform(originShift)
     for i in range(len(gen2)):
         o = gen2[i]
-        correction = originShift
         matrices.append(originShift * o.matrix_world)
     for j in range(len(gen3plus)):
         o = gen3plus[j]
@@ -1146,22 +1157,23 @@ def prep_meshes(objs, materials):
         for vhot in [e for e in o.children if e.type == 'EMPTY']:
             vhots[-1].append((vhot.name,vhot.matrix_local.translation))
     for i in range(len(vhots)):
-        vhots[i] = [j[1] for j in sorted(vhots[i])] # force the [:6] limit?
+        vhots[i] = [j[1] for j in sorted(vhots[i])]
     hier = build_hierarchy(root, branches)
     kinem = init_kinematics([None] + branches, hier, matrices)
     meshes = [rootMesh]+branchMeshes
-    for bm in meshes:
-        strip_wires(bm)
-    return (names,meshes,vhots,kinem,bbox)
+    return (names,meshes,vhots,kinem,shift_box(bbox, originShift))
 
-def do_export(fileName, clear, bright):
+def do_export(fileName, clear, bright, worldOrigin):
     materials = [m for m in bpy.data.materials if
         any([m in [ms.material for ms in o.material_slots]
             for o in bpy.data.objects])]
     objs = [o for o in bpy.data.objects if o.type == 'MESH' and not o.hide]
     if not objs:
         return ("Nothing to export.",{'CANCELLED'})
-    names, meshes, vhots, kinem, bbox = prep_meshes(objs, materials)
+    names, meshes, vhots, kinem, bbox = prep_meshes(
+        objs,
+        materials,
+        worldOrigin)
     model = Model(
         kinem,
         meshes,
@@ -1218,6 +1230,10 @@ class ExportDarkBin(bpy.types.Operator, ExportHelper):
         name="Use Emission",
         default=True,
         description="Use the Emit values set on materials")
+    worldOrigin = BoolProperty(
+        name="Model origin is at world origin",
+        default=True,
+        description="Otherwise, it is in the center of the geometry")
     path_mode = path_reference_mode
     check_extension = True
     path_mode = path_reference_mode
@@ -1225,7 +1241,8 @@ class ExportDarkBin(bpy.types.Operator, ExportHelper):
         msg, result = do_export(
             self.filepath,
             self.clear,
-            self.bright)
+            self.bright,
+            self.worldOrigin)
         if result == {'CANCELLED'}:
             self.report({'ERROR'}, msg)
         print(msg)
