@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20140704),
-    "blender": (2, 6, 8),
+    "version": (0, 1, 20150105),
+    "blender": (2, 7, 3),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
     "warning": "",
@@ -22,6 +22,10 @@ from bpy_extras.io_utils import (
     ExportHelper,
     ImportHelper,
     path_reference_mode)
+
+def compat(major, minor, rev):
+    v = bpy.app.version
+    return v[0] >= major and v[1] >= minor and v[2] >= rev
 
 ###
 ### Import
@@ -64,16 +68,21 @@ def get_string(bs):
 
 class SubobjectImported(object):
     def __init__(self, bs, faceRefs, faces, materials, vhots):
+        #~ self.name   = get_string(bs[:8])
+        #~ self.motion = bs[8]
+        #~ self.parm   = unpack('<i', bs[9:13])[0]
+        #~ self.min   = unpack('<f', bs[13:17])[0]
+        #~ self.max   = unpack('<f', bs[17:21])[0]
+        #~ self.child  = unpack('<h', bs[69:71])[0]
+        #~ self.next   = unpack('<h', bs[71:73])[0]
+        #~ self.xform  = get_floats(bs[21:69])
+        #~ curVhotsStart, numCurVhots = get_ushorts(bs[73:77])
         self.name   = get_string(bs[:8])
-        self.motion = bs[8]
-        self.parm   = unpack('<i', bs[9:13])[0]
-        self.min   = unpack('<f', bs[13:17])[0]
-        self.max   = unpack('<f', bs[17:21])[0]
-        self.child  = unpack('<h', bs[69:71])[0]
-        self.next   = unpack('<h', bs[71:73])[0]
-        self.xform  = get_floats(bs[21:69])
+        self.motion, self.parm, self.min, self.max = unpack('<Biff', bs[8:21])
+        self.next, self.child  = unpack('<hh', bs[69:73])
+        self.xform = get_floats(bs[21:69])
         curVhotsStart, numCurVhots = get_ushorts(bs[73:77])
-        self.vhots  = vhots[curVhotsStart:curVhotsStart+numCurVhots]
+        self.vhots = vhots[curVhotsStart:curVhotsStart+numCurVhots]
         facesHere = [faces[addr] for addr in faceRefs]
         matsUsed = {}
         for f in facesHere:
@@ -279,6 +288,8 @@ def build_bmesh(bm, sub, verts):
         bmVerts = []
         for oldIndex in f.binVerts:
             newIndex = aka(oldIndex, verts)[0]
+            if compat(2, 73, 0):
+                bm.verts.ensure_lookup_table()
             bmVerts.append(bm.verts[newIndex])
         bmVerts.reverse() # flip normal
         try:
@@ -295,6 +306,8 @@ def build_bmesh(bm, sub, verts):
             f.bmeshVerts = extraVerts
         bm.faces.index_update()
     for i in range(len(faces)):
+        if compat(2, 73, 0):
+            bm.faces.ensure_lookup_table()
         bmFace = bm.faces[i]
         binFace = faces[i]
         bmFace.material_index = sub.matSlotIndexFor(binFace.binMat)
@@ -1022,6 +1035,9 @@ def append_bmesh(bm1, bm2, matrix):
     for f in bm2.faces:
         origMat = f.material_index
         try:
+            if compat(2, 73, 0):
+                bm1.verts.ensure_lookup_table()
+                bm1.faces.ensure_lookup_table()
             nf = bm1.faces.new(
                 [bm1.verts[vSoFar+v.index] for v in f.verts])
         except ValueError:
@@ -1220,8 +1236,7 @@ class ExportDarkBin(bpy.types.Operator, ExportHelper):
     filename_ext = ".bin"
     filter_glob = StringProperty(
         default="*.bin",
-        options={'HIDDEN'},
-        )
+        options={'HIDDEN'})
     clear = BoolProperty(
         name="Use Translucency",
         default=True,
