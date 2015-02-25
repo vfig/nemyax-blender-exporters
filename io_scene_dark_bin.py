@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20150105),
+    "version": (0, 1, 20150225),
     "blender": (2, 7, 3),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -79,7 +79,7 @@ class SubobjectImported(object):
         #~ curVhotsStart, numCurVhots = get_ushorts(bs[73:77])
         self.name   = get_string(bs[:8])
         self.motion, self.parm, self.min, self.max = unpack('<Biff', bs[8:21])
-        self.next, self.child  = unpack('<hh', bs[69:73])
+        self.child, self.next  = unpack('<hh', bs[69:73])
         self.xform = get_floats(bs[21:69])
         curVhotsStart, numCurVhots = get_ushorts(bs[73:77])
         self.vhots = vhots[curVhotsStart:curVhotsStart+numCurVhots]
