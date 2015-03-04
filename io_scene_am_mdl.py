@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Animation:Master Model",
     "author": "nemyax",
-    "version": (0, 1, 20150218),
+    "version": (0, 1, 20150304),
     "blender": (2, 7, 3),
     "location": "File > Import-Export",
     "description": "Export Animation:Master .mdl",
