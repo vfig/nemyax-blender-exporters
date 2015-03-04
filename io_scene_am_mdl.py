@@ -296,7 +296,6 @@ def do_spline(s, bm):
         other = fused_with(e, bm)
         v = cp_v(e, bm)
         ei = e.index
-        print("other:", other)
         if other != None and v[uvc] != ei:
             result += "{} 1 {} {} . .\r\n".format(
                 magic, ei + 1, other + 1)
@@ -319,10 +318,8 @@ def fanout(v, bm):
     result = []
     for e in es:
         pei = int(e[pred])
-        print(e.index, "<-", pei)
         if pei in eis:
             result.append(e.index)
-    print("fanout result:", result)
     return result
 
 def fused_with(e, bm):
@@ -336,7 +333,6 @@ def cp_v(e, bm):
         bm.edges.ensure_lookup_table()
     v1, v2 = e.verts
     pei = int(e[pred])
-    print("pred of", e.index, "is", pei)
     if pei < 0:
         if len(v1.link_edges) == 1:
             return v1
