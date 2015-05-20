@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Zaloopok",
     "author": "nemyax",
-    "version": (0, 2, 20131224),
-    "blender": (2, 6, 4),
+    "version": (0, 2, 20150520),
+    "blender": (2, 7, 4),
     "location": "",
-    "description": "Clones of a few selection tools from Wings3D",
+    "description": "Adaptations of a few tools from Wings3D",
     "warning": "",
     "wiki_url": "",
     "tracker_url": "",
@@ -12,7 +12,7 @@ bl_info = {
 
 import bpy
 from bpy.props import FloatProperty
-import bmesh
+import bmesh, mathutils as mu
 
 def loop_extension(edge, vert):
     candidates = vert.link_edges[:]
@@ -153,7 +153,7 @@ def group_selected(edges):
             chains[-1].extend([e])
         else:
             chains.append([])
-    return [c for c in chains if c != []]
+    return [c for c in chains if c]
 
 def group_unselected(edges):
     gaps = [[]]
@@ -256,6 +256,135 @@ def select_bounded_ring(context):
     mesh.update()
     return {'FINISHED'}
 
+def group(edges):
+    frags = [[]]
+    vs = set()
+    while edges:
+        e0 = edges.pop()
+        frags[-1].append(e0)
+        vs.add(e0.verts[0])
+        vs.add(e0.verts[1])
+        while True:
+            adj = [e for e in edges
+                if e.verts[0] in vs or e.verts[1] in vs]
+            if not adj:
+                frags.append([])
+                vs.clear()
+                break
+            for e in adj:
+                frags[-1].append(e)
+                vs.add(e.verts[0])
+                vs.add(e.verts[1])
+                extract(edges, e)
+    return [a for a in frags if a]
+
+def eq_edges(context):
+    mesh = context.active_object.data
+    bm = bmesh.from_edit_mesh(mesh)
+    frags = group([e for e in bm.edges if e.select])
+    good_frags = [f for f in frags
+        if all([e for e in f
+            if nonstar(e.verts[0]) and nonstar(e.verts[1])])]
+    closed_frags = []
+    open_frags = []
+    while good_frags:
+        f = good_frags.pop()
+        if all([(thru(e.verts[0]) and thru(e.verts[1])) for e in f]):
+            closed_frags.append(f)
+        else:
+            open_frags.append(f)
+    for f in closed_frags:
+        circularize(f)
+    for f in open_frags:
+        string_along(f)
+    context.active_object.data.update()
+    return {'FINISHED'}
+
+def circularize(es):
+    ovs = v_order(es)
+    n = len(ovs)
+    center = mu.Vector((
+        sum([v.co[0] for v in ovs]) / n,
+        sum([v.co[1] for v in ovs]) / n,
+        sum([v.co[2] for v in ovs]) / n))
+    dists = [(v.co - center).magnitude for v in ovs]
+    avg_d = (max(dists) + min(dists)) * 0.5
+    crosses = []
+    for v in ovs:
+        pv = ovs[ovs.index(v)-1]
+        crosses.append((pv.co - center).cross(v.co - center))
+    nrm = mu.Vector((
+        sum([a[0] for a in crosses]) / n,
+        sum([a[1] for a in crosses]) / n,
+        sum([a[2] for a in crosses]) / n)).normalized()
+    nrm2 = nrm.cross(center - ovs[0].co)
+    offset = nrm.cross(nrm2)
+    offset.magnitude = avg_d
+    rot_step = mu.Quaternion(nrm, 6.283185307179586 / (n - 1))
+    for v in ovs:
+        v.co = center + offset
+        offset.rotate(rot_step)
+
+def string_along(es):
+    ovs = v_order(es)
+    step = (ovs[-1].co - ovs[0].co)
+    step.magnitude /= (len(ovs) - 1)
+    coords = ovs[0].co + step
+    for v in ovs[1:-1]:
+        v.co = coords
+        coords += step
+
+def v_order(es):
+    vs = set()
+    ends = [e for e in es
+        if not thru(e.verts[0]) or not thru(e.verts[1])]
+    if ends:
+        e = ends[0]
+        end_vs = [v for v in e.verts
+            if not thru(v)]
+        res = [end_vs[0]]
+    else:
+        e = es[0]
+        res = [es[0].verts[0]]
+    orig_e = e
+    while True:
+        prev = res[-1]
+        nv, ne = nxt_v(prev, e)
+        res.append(nv)
+        if not ne or ne == orig_e:
+            break
+        e = ne
+    return res
+
+def nxt_v(v, e):
+    nv = e.other_vert(v)
+    es = [a for a in nv.link_edges if e != a and a.select]
+    if es:
+        return nv, es[0]
+    else:
+        return nv, None
+
+def order(vs): # unused
+    res = [vs.pop(0)]
+    while vs:
+        prev = res[-1]
+        e = [a for a in prev.link_edges if a.select][0]
+        nxt = vs.pop(vs.index([v for v in vs if v in e.verts][0]))
+        res.append(nxt)
+    return res
+
+def nonstar(v):
+    return rays(v) < 3
+
+def thru(v):
+    return rays(v) == 2
+
+def rays(v):
+    return len([e for e in v.link_edges if e.select])
+
+def extract(l, el):
+    return l.pop(l.index(el))
+
 class ZaloopokView3DPanel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'TOOLS'
@@ -293,7 +422,11 @@ class ZaloopokView3DPanel(bpy.types.Panel):
                     subcol4.operator("mesh.z_to_edges", text="Edges")
                 if not comp_sel[2]:
                     subcol4.operator("mesh.z_to_faces", text="Faces")
-
+        col.separator()
+        subcol5 = col.column(align=True)
+        if comp_sel[1]:
+            subcol5.operator("mesh.z_eq_edges", text="Equalize Edges")
+    
 class GrowLoop(bpy.types.Operator):
     bl_idname = "mesh.z_grow_loop"
     bl_label = "Grow Loop"
@@ -454,6 +587,20 @@ class ToVerts(bpy.types.Operator):
         context.active_object.data.update()
         return {'FINISHED'}
 
+class EdgeEq(bpy.types.Operator):
+    '''Equalize the selected contiguous edges.'''
+    bl_idname = "mesh.z_eq_edges"
+    bl_label = 'Equalize'
+    bl_options = {'PRESET', 'REGISTER'}
+
+    @classmethod
+    def poll(cls, context):
+        sm = context.tool_settings.mesh_select_mode[:]
+        return (context.mode == 'EDIT_MESH' and sm[1])
+
+    def execute(self, context):
+        return eq_edges(context)
+
 def register():
     bpy.utils.register_class(ZaloopokView3DPanel)
     bpy.utils.register_class(GrowLoop)
@@ -465,6 +612,7 @@ def register():
     bpy.utils.register_class(ToFaces)
     bpy.utils.register_class(ToEdges)
     bpy.utils.register_class(ToVerts)
+    bpy.utils.register_class(EdgeEq)
 
 def unregister():
     bpy.utils.unregister_class(ZaloopokView3DPanel)
@@ -477,6 +625,7 @@ def unregister():
     bpy.utils.unregister_class(ToFaces)
     bpy.utils.unregister_class(ToEdges)
     bpy.utils.unregister_class(ToVerts)
+    bpy.utils.unregister_class(EdgeEq)
 
 if __name__ == "__main__":
     register()
