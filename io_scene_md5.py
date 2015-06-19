@@ -1,20 +1,22 @@
 bl_info = {
     "name": "id tech 4 MD5 format",
     "author": "nemyax",
-    "version": (0, 7, 20130705),
+    "version": (0, 8, 20150618),
     "blender": (2, 6, 6),
     "location": "File > Import-Export",
-    "description": "Export md5mesh and md5anim",
+    "description": "Import and export md5mesh and md5anim",
     "warning": "",
     "wiki_url": "",
     "tracker_url": "",
     "category": "Import-Export"}
 
 import bpy
+import os
 import bmesh
 import os.path
-import mathutils
+import mathutils as mu
 import math
+import re
 from bpy.props import (
     BoolProperty,
     FloatProperty,
@@ -33,6 +35,337 @@ md5Layer = IntProperty(
         min=1, max=20,
         default=5)
 bpy.types.Scene.md5_bone_layer = md5Layer
+
+def compat(major, minor, rev):
+    v = bpy.app.version
+    return v[0] >= major and v[1] >= minor and v[2] >= rev
+
+###
+### Import functions
+###
+
+### .md5mesh import
+
+def read_md5mesh(path, matrix):
+    i = "\s+(\d+)"
+    w = "\s+(.+?)"
+    a = "(.+?)"
+    j_re  = re.compile(
+        "\s*\""+a+"\""+w+"\s+\("+w*3+"\s+\)\s+\("+w*3+"\s+\).*")
+    v_re  = re.compile("\s*vert"+i+"\s+\("+w*2+"\s+\)"+i*2+".*")
+    t_re  = re.compile("\s*tri"+i*4+".*")
+    w_re  = re.compile("\s*weight"+i*2+w+"\s+\("+w*3+"\).*")
+    e_re  = re.compile("\s*}.*")
+    js_re = re.compile("\s*joints\s+{.*")
+    n_re  = re.compile("\s*(numverts).*")
+    m_re  = re.compile("\s*mesh\s+{.*")
+    s_re  = re.compile("\s*shader\s+\""+a+"\".*")
+    fh = open(path, "r")
+    md5mesh = fh.readlines()
+    fh.close()
+    m = None
+    while not m:
+        m = js_re.match(md5mesh.pop(0))
+    arm_o, ms = do_joints(md5mesh, j_re, e_re)
+    pairs = []
+    while md5mesh:
+        mat_name, bm = do_mesh(md5mesh, s_re, v_re, t_re, w_re, e_re, n_re, ms)
+        pairs.append((mat_name, bm))
+        skip_until(m_re, md5mesh)
+    for mat_name, bm in pairs:
+        mesh = bpy.data.meshes.new("md5mesh")
+        bm.to_mesh(mesh)
+        bm.free()
+        mesh_o = bpy.data.objects.new("md5mesh", mesh)
+        vgs = mesh_o.vertex_groups
+        for jn, _ in ms:
+            vgs.new(name=jn)
+        arm_mod = mesh_o.modifiers.new(type='ARMATURE', name="MD5_skeleton")
+        arm_mod.object = arm_o
+        bpy.context.scene.objects.link(mesh_o)
+        bpy.context.scene.objects.active = mesh_o
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.object.material_slot_add()
+        try:
+            mat = bpy.data.materials[mat_name]
+        except KeyError:
+            mat = bpy.data.materials.new(mat_name)
+        mesh_o.material_slots[-1].material = mat
+        bpy.ops.object.mode_set()
+
+def do_mesh(md5mesh, s_re, v_re, t_re, w_re, e_re, n_re, ms):
+    bm = bmesh.new()
+    mat_name = gather(s_re, n_re, md5mesh)[0][0]
+    vs, ts, ws = gather_multi([v_re, t_re, w_re], e_re, md5mesh)
+    wd  = bm.verts.layers.deform.verify()
+    uvs = bm.loops.layers.uv.verify()
+    for vi in range(len(vs)):
+        wt, nwt = map(int, vs[vi][3:])
+        w0 = ws[wt]
+        mtx = ms[int(w0[1])][1]
+        xyz = mtx * mu.Vector(map(float, w0[3:]))
+        new_v = bm.verts.new(xyz)
+        bm.verts.index_update()
+        for i in ws[wt:wt+nwt]:
+            index = int(i[1])
+            val = float(i[2])
+            new_v[wd][index] = val
+    if compat(2, 73, 0):
+        bm.verts.ensure_lookup_table()
+    for t in ts:
+        tvs = [bm.verts[a] for a in map(int, t[1:])]
+        new_f = bm.faces.new(tvs)
+        bm.faces.index_update()
+        for vn in tvs:
+            ln = [l for l in new_f.loops if l.vert == vn][0]
+            u0, v0 = map(float, vs[vn.index][1:3])
+            ln[uvs].uv = (u0, 1.0 - v0)
+    return mat_name, bm
+
+def do_joints(md5mesh, j_re, e_re):
+    joints = {}
+    jdata = gather(j_re, e_re, md5mesh)
+    for i in range(len(jdata)):
+        joints[i] = jdata[i]
+    arm = bpy.data.armatures.new("MD5")
+    arm_o = bpy.data.objects.new("MD5", arm)
+    bpy.context.scene.objects.link(arm_o)
+    bpy.context.scene.objects.active = arm_o
+    bpy.ops.object.mode_set()
+    bpy.ops.object.mode_set(mode='EDIT')
+    ebs = arm.edit_bones
+    ms = []
+    for j in joints.values():
+        j_name = j[0]
+        eb = ebs.new(j_name)
+        p = int(j[1])
+        if p >= 0:
+            eb.parent = ebs[joints[p][0]]
+        tx, ty, tz, rx, ry, rz = [float(a) for a in j[2:]]
+        quat = -mu.Quaternion(restore_quat(rx, ry, rz))
+        mtx = mu.Matrix.Translation((tx, ty, tz)) * quat.to_matrix().to_4x4()
+        ms.append((j_name, mtx))
+        eb.head = (0.0, 0.0, 0.0)
+        eb.tail = (0.0, 1.0, 0.0)
+        eb.matrix = mtx
+        eb.length = 5.0
+    bpy.ops.object.mode_set()
+    bl = bpy.context.scene.md5_bone_layer - 1
+    for b in arm.bones:
+        b.layers[bl] = True
+    return arm_o, ms
+
+### .md5anim import functions
+
+def read_md5anim(path):
+    label = path.split(os.sep)[-1].split(".")[-2]
+    ao = bpy.context.active_object
+    skel = bone_tree_blender(ao.data)
+    fh = open(path, "r")
+    md5anim = fh.readlines()
+    fh.close()
+    w = "\s+(.+?)"
+    a = "(.+?)"
+    j_re   = re.compile("\s*\""+a+"\""+w*3+".*")
+    e_re   = re.compile("\s*}.*")
+    bf0_re = re.compile("\s*(baseframe)\s+{.*")
+    bf1_re = re.compile("\s*\("+w*3+"\s+\)\s+\("+w*3+"\s+\).*")
+    f_re   = re.compile("\s*(frame).*")
+    hier = gather(j_re, e_re, md5anim)
+    for i in range(len(hier)):
+        jname, par, flags = hier[i][:-1]
+        hier[i] = (i, jname, int(par), int(flags))
+    md5skel = bone_tree_md5(hier)
+    if skel != md5skel:
+        return message("no_arm_match"), {'CANCELLED'}
+    skip_until(bf0_re, md5anim)
+    bframe = gather(bf1_re, e_re, md5anim)
+    bxfs = get_base_xforms(bframe)
+    skip_until(f_re, md5anim)
+    pbs = [ao.pose.bones[j[1]] for j in hier]
+    frames = pad_frames(hier, bxfs, do_frames(e_re, md5anim))
+    fcurves = get_fcurves(pbs)
+    xf_keys = convert_xforms(pbs, transpose(frames))
+    sc = bpy.context.scene
+    start_frame = sc.frame_current
+    end_frame = start_frame + len(frames) - 1
+    set_keys(
+        flatten_channels(fcurves),
+        flatten_frames(xf_keys),
+        start_frame)
+    sc.timeline_markers.new(label + "_start", start_frame)
+    sc.timeline_markers.new(label + "_end", end_frame)
+    sc.frame_current = end_frame
+    return "Animation imported successfully.", {'FINISHED'}
+
+def do_frames(e_re, md5anim):
+    valid = re.compile("[-\.0-9\s]+")
+    val   = re.compile("(\S+)")
+    result = [[]]
+    while md5anim:
+        l = md5anim.pop(0)
+        if e_re.match(l):
+            result.append([])
+            continue
+        if valid.match(l):
+            vals = [float(a) for a in val.findall(l)]
+            if vals:
+                result[-1].append(vals)
+    return [a for a in result if a]
+
+def get_base_xforms(bframe):
+    return [[float(b) for b in a] for a in bframe]
+
+def convert_xforms(pbs, val_lists):
+    result = []
+    for pb, states in zip(pbs, val_lists):
+        result.append([])
+        par = pb.parent
+        if par:
+            tweak = pb.bone.matrix_local.inverted() * par.bone.matrix_local
+        else:
+            tweak = pb.bone.matrix_local.inverted()
+        for vl in states:
+            l = mu.Vector(vl[:3])
+            q = mu.Quaternion(restore_quat(vl[3], vl[4], vl[5]))
+            mtx = q.to_matrix().to_4x4()
+            mtx.translation = l
+            mtx = tweak * mtx
+            xf = []
+            xf.extend(mtx.translation[:])
+            xf.extend(mtx.to_quaternion()[:])
+            xf.extend(mtx.to_euler()[:])
+            result[-1].append(xf)
+    return result
+
+def pad_frames(hier, bxfs, frames):
+    result = []
+    for val_lists in frames:
+        result.append([])
+        for j, xf in zip(hier, bxfs):
+            xf0 = xf[:]
+            flags = j[3]
+            if not flags:
+                vl = []
+            else:
+                vl = val_lists.pop(0)
+            mask = 1
+            for i in range(6):
+                if mask & flags:
+                    xf0[i] = vl.pop(0)
+                mask *= 2
+            result[-1].append(xf0)
+    return result
+
+def transpose(table):
+    result = []
+    if table:
+        while table[0]:
+            result.append([])
+            for col in table:
+                result[-1].append(col.pop(0))
+    return result
+
+def get_fcurves(pbs):
+    cf = float(bpy.context.scene.frame_current)
+    fcurves = []
+    l = "location"
+    q = "rotation_quaternion"
+    e = "rotation_euler"
+    for pb in pbs:
+        pb.keyframe_insert(l)
+        pb.keyframe_insert(q)
+        pb.keyframe_insert(e)
+        entry = {l:{},q:{},e:{}}
+        pbn = pb.name
+        fc_re = re.compile("pose\.bones\[."+pbn+".\]\.("+l+"|"+q+"|"+e+")")
+        for fc in pb.id_data.animation_data.action.fcurves:
+            m = fc_re.match(fc.data_path)
+            if m:
+                key1 = m.group(1)
+                key2 = fc.array_index
+                entry[key1][key2] = fc
+        fcurves.append(entry)
+    return fcurves
+
+def list_fcurves(fcurves):
+    l = "location"
+    q = "rotation_quaternion"
+    e = "rotation_euler"
+    return [
+        fcurves[l][0], fcurves[l][1], fcurves[l][2],
+        fcurves[q][0], fcurves[q][1], fcurves[q][2], fcurves[q][3],
+        fcurves[e][0], fcurves[e][1], fcurves[e][2]]
+
+def flatten_channels(fcurves):
+    result = []
+    for a in fcurves:
+        result.extend([b.keyframe_points for b in list_fcurves(a)])
+    return result
+
+def flatten_frames(pbs): # :: [[[a]]] -> [[a]]
+    result = []
+    for b in pbs:
+        temp = [[] for _ in range(10)]
+        for frame in b:
+            for i in range(10):
+                temp[i].append(frame[i])
+        result.extend(temp)
+    return result
+
+def set_keys(channels, val_lists, f_start):
+    for ch, vl in zip(channels, val_lists):
+        i = f_start
+        for v in vl:
+            ch.insert(i, v)
+            i += 1
+
+### parsing and utility functions
+
+def gather(regex, end_regex, ls):
+    return gather_multi([regex], end_regex, ls)[0]
+ 
+def gather_multi(regexes, end_regex, ls):
+    result = [[] for _ in regexes]
+    n = len(regexes)
+    while ls:
+        l = ls.pop(0)
+        if end_regex.match(l):
+            break
+        for i in range(n):
+            m = regexes[i].match(l)
+            if m:
+                result[i].append(m.groups())
+                break
+    return result
+
+def skip_until(regex, ls):
+    while ls:
+        if regex.match(ls.pop(0)):
+            break
+
+def restore_quat(rx, ry, rz):
+    t = 1.0 - (rx * rx) - (ry * ry) - (rz * rz)
+    if t < 0.0:
+        return (0.0, rx, ry, rz)
+    else:
+        return (-math.sqrt(t), rx, ry, rz)
+
+def bone_tree_blender(arm):
+    bl = bpy.context.scene.md5_bone_layer - 1
+    return btb(None, [b for b in arm.bones if b.layers[bl]])
+
+def btb(b, bs): # recursive; shouldn't matter for poxy md5 skeletons
+    ch = sorted([a for a in bs if a.parent == b], key=lambda x: x.name)
+    return [[c.name, btb(c, bs)] for c in ch]
+
+def bone_tree_md5(lst):
+    root = [a for a in lst if a[2] == -1][0]
+    return [[root[1], btm(root, lst)]]
+
+def btm(e, l):
+    ch = sorted([a for a in l if a[2] == e[0]], key=lambda x: x[1])
+    return [[c[1], btm(c, l)] for c in ch]
 
 ###
 ### Export functions
@@ -169,6 +502,12 @@ def make_joints_block(bones, boneIndexLookup, correctionMatrix):
     return block
 
 def make_mesh_block(obj, bones, correctionMatrix):
+    shaderName = "default"
+    ms = obj.material_slots
+    if ms:
+        taken = [s for s in ms if s.material]
+        if taken:
+            shaderName = taken[0].material.name
     bm = bmesh.new()
     bm.from_mesh(obj.data)
     triangulate(cut_up(strip_wires(bm)))
@@ -176,7 +515,7 @@ def make_mesh_block(obj, bones, correctionMatrix):
     bm.free()
     block = []
     block.append("mesh {\n")
-    block.append("  shader \"default\"\n")
+    block.append("  shader \"{}\"\n".format(shaderName))
     block.append("  numverts {}\n".format(len(verts)))
     for v in verts:
         block.append(\
@@ -224,22 +563,10 @@ def cut_up(bm):
         bmesh.utils.vert_separate(maybeBowTie, boundaries)
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
     return bm
-      
+
 def triangulate(bm):
-    while True:
-        nonTris = [f for f in bm.faces if len(f.verts) > 3]
-        if nonTris:
-            nt = nonTris[0]
-            pivotLoop = nt.loops[0]
-            allVerts = nt.verts
-            vert1 = pivotLoop.vert
-            wrongVerts = [vert1,
-                pivotLoop.link_loop_next.vert,
-                pivotLoop.link_loop_prev.vert]
-            bmesh.utils.face_split(nt, vert1, [v for v in allVerts
-                if v not in wrongVerts][0])
-            for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
-        else: break
+    nonTris = [f for f in bm.faces if len(f.verts) > 3]
+    bmesh.ops.triangulate(bm, faces=nonTris)
     return bm
 
 def write_md5mesh(filePath, prerequisites, correctionMatrix):
@@ -362,7 +689,6 @@ def write_batch(filePath, prerequisites, correctionMatrix, markerFilter):
 ### Operators and auxiliary functions
 ###
 
-
 # Functions
 
 def concat_strings(strings):
@@ -377,7 +703,7 @@ def message(id, *details):
 Select the meshes you want to export, and retry export."""
     elif id == 'multiple_armatures':
         return """The selected meshes use more than one armature.
-Select the meshes using the same armature, and try again."""
+Select meshes that use the same armature, and try again."""
     elif id == 'no_armature':
         return """No deforming armature is associated with the selection.
 Select the model or models you want to export, and try again"""
@@ -425,6 +751,12 @@ and retry export."""
         return "The '" + details[0] + """' object has no UV coordinates.
 Valid MD5 data cannot be produced. Unwrap the object
 or exclude it from your selection, and retry export."""
+    elif id == 'no_arm':
+        return """No armature is selected to add animation to.
+Select a valid armature, and retry import."""
+    elif id == 'no_arm_match':
+        return """The selected armature does not match the skeleton
+in the file you are trying to import."""
 
 def check_weighting(obj, bm, bones):
     boneNames = [b.name for b in bones]
@@ -520,6 +852,75 @@ def manage_bone_layers(doWhat):
 
 # Operators
 
+### Import UI
+
+class ImportMD5Mesh(bpy.types.Operator, ImportHelper):
+    '''Load an MD5 Mesh File'''
+    bl_idname = "import_scene.md5mesh"
+    bl_label = 'Import MD5MESH'
+    bl_options = {'PRESET'}
+    filename_ext = ".md5mesh"
+    filter_glob = StringProperty(
+            default="*.md5mesh",
+            options={'HIDDEN'})
+    path_mode = path_reference_mode
+    check_extension = True
+    reorient = BoolProperty(
+            name="Reorient",
+            description="Change the direction that the model faces",
+            default=True)
+    scaleFactor = FloatProperty(
+            name="Scale",
+            description="Scale all data",
+            min=0.01, max=1000.0,
+            soft_min=0.01,
+            soft_max=1000.0,
+            default=1.0)
+    path_mode = path_reference_mode
+    check_extension = True
+    def execute(self, context):
+        orientationTweak = mu.Matrix.Rotation(math.radians(
+            -90 * float(self.reorient)),4,'Z')
+        scaleTweak = mu.Matrix.Scale(self.scaleFactor, 4)
+        correctionMatrix = orientationTweak * scaleTweak
+        read_md5mesh(self.filepath, correctionMatrix)
+        return {'FINISHED'}
+
+class MaybeImportMD5Anim(bpy.types.Operator):
+    '''Import single MD5 animation (start from current frame)'''
+    bl_idname = "export_scene.maybe_import_md5anim"
+    bl_label = 'Import MD5ANIM'
+    def invoke(self, context, event):
+        ao = bpy.context.active_object
+        if ao and ao.type == 'ARMATURE' and ao.data.bones[:]:
+            return bpy.ops.import_scene.md5anim('INVOKE_DEFAULT')
+        else:
+            msg = message("no_arm")
+            print(msg)
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+
+class ImportMD5Anim(bpy.types.Operator, ImportHelper):
+    '''Load an MD5 Animation File'''
+    bl_idname = "import_scene.md5anim"
+    bl_label = 'Import MD5ANIM'
+    bl_options = {'PRESET'}
+    filename_ext = ".md5anim"
+    filter_glob = StringProperty(
+            default="*.md5anim",
+            options={'HIDDEN'})
+    path_mode = path_reference_mode
+    check_extension = True
+    check_extension = True
+    def execute(self, context):
+        msg, res = read_md5anim(self.filepath)
+        if res == {'CANCELLED'}:
+            self.report({'ERROR'}, msg)
+        print(msg)
+        return res
+
+### Bone layer management
+
 class MD5BonesAdd(bpy.types.Operator):
     '''Add the selected bones to the bone layer reserved for MD5'''
     bl_idname = "scene.md5_bones_add"
@@ -576,9 +977,11 @@ class MD5Panel(bpy.types.Panel):
         else:
             column1.enabled = False
 
-class MaybeMD5Mesh(bpy.types.Operator):
+### Export UI
+
+class MaybeExportMD5Mesh(bpy.types.Operator):
     '''Export selection as MD5 mesh'''
-    bl_idname = "export_scene.maybe_md5mesh"
+    bl_idname = "export_scene.maybe_export_md5mesh"
     bl_label = 'Export MD5MESH'
     def invoke(self, context, event):
         global msgLines, prerequisites
@@ -593,9 +996,9 @@ class MaybeMD5Mesh(bpy.types.Operator):
             self.report({'ERROR'}, msgLines)
             return {'CANCELLED'}
 
-class MaybeMD5Anim(bpy.types.Operator):
+class MaybeExportMD5Anim(bpy.types.Operator):
     '''Export single MD5 animation (use current frame range)'''
-    bl_idname = "export_scene.maybe_md5anim"
+    bl_idname = "export_scene.maybe_export_md5anim"
     bl_label = 'Export MD5ANIM'
     def invoke(self, context, event):
         global msgLines, prerequisites
@@ -610,9 +1013,9 @@ class MaybeMD5Anim(bpy.types.Operator):
             self.report({'ERROR'}, msgLines)
             return {'CANCELLED'}
 
-class MaybeMD5Batch(bpy.types.Operator):
+class MaybeExportMD5Batch(bpy.types.Operator):
     '''Export a batch of MD5 files'''
-    bl_idname = "export_scene.maybe_md5batch"
+    bl_idname = "export_scene.maybe_export_md5batch"
     bl_label = 'Export MD5 Files'
     def invoke(self, context, event):
         global msgLines, prerequisites
@@ -656,9 +1059,9 @@ class ExportMD5Mesh(bpy.types.Operator, ExportHelper):
     path_mode = path_reference_mode
     check_extension = True
     def execute(self, context):
-        orientationTweak = mathutils.Matrix.Rotation(math.radians(
+        orientationTweak = mu.Matrix.Rotation(math.radians(
             -90 * float(self.reorient)),4,'Z')
-        scaleTweak = mathutils.Matrix.Scale(self.scaleFactor, 4)
+        scaleTweak = mu.Matrix.Scale(self.scaleFactor, 4)
         correctionMatrix = orientationTweak * scaleTweak
         write_md5mesh(self.filepath, prerequisites, correctionMatrix)
         return {'FINISHED'}
@@ -692,9 +1095,9 @@ class ExportMD5Anim(bpy.types.Operator, ExportHelper):
     path_mode = path_reference_mode
     check_extension = True
     def execute(self, context):
-        orientationTweak = mathutils.Matrix.Rotation(math.radians(
+        orientationTweak = mu.Matrix.Rotation(math.radians(
             -90 * float(self.reorient)),4,'Z')
-        scaleTweak = mathutils.Matrix.Scale(self.scaleFactor, 4)
+        scaleTweak = mu.Matrix.Scale(self.scaleFactor, 4)
         correctionMatrix = orientationTweak * scaleTweak
         write_md5anim(self.filepath, prerequisites, correctionMatrix, None)
         return {'FINISHED'}
@@ -734,9 +1137,9 @@ class ExportMD5Batch(bpy.types.Operator, ExportHelper):
     path_mode = path_reference_mode
     check_extension = True
     def execute(self, context):
-        orientationTweak = mathutils.Matrix.Rotation(math.radians(
+        orientationTweak = mu.Matrix.Rotation(math.radians(
             -90 * float(self.reorient)),4,'Z')
-        scaleTweak = mathutils.Matrix.Scale(self.scaleFactor, 4)
+        scaleTweak = mu.Matrix.Scale(self.scaleFactor, 4)
         correctionMatrix = orientationTweak * scaleTweak
         write_batch(
                 self.filepath,
@@ -745,24 +1148,35 @@ class ExportMD5Batch(bpy.types.Operator, ExportHelper):
                 self.markerFilter)
         return {'FINISHED'}
 
+def menu_func_import_mesh(self, context):
+    self.layout.operator(
+        ImportMD5Mesh.bl_idname, text="MD5 Mesh (.md5mesh)")
+def menu_func_import_anim(self, context):
+    self.layout.operator(
+        MaybeImportMD5Anim.bl_idname, text="MD5 Animation (.md5anim)")
+
 def menu_func_export_mesh(self, context):
     self.layout.operator(
-        MaybeMD5Mesh.bl_idname, text="MD5 Mesh (.md5mesh)")
+        MaybeExportMD5Mesh.bl_idname, text="MD5 Mesh (.md5mesh)")
 def menu_func_export_anim(self, context):
     self.layout.operator(
-        MaybeMD5Anim.bl_idname, text="MD5 Animation (.md5anim)")
+        MaybeExportMD5Anim.bl_idname, text="MD5 Animation (.md5anim)")
 def menu_func_export_batch(self, context):
     self.layout.operator(
-        MaybeMD5Batch.bl_idname, text="MD5 (batch export)")
+        MaybeExportMD5Batch.bl_idname, text="MD5 (batch export)")
 
 def register():
     bpy.utils.register_module(__name__)
+    bpy.types.INFO_MT_file_import.append(menu_func_import_mesh)
+    bpy.types.INFO_MT_file_import.append(menu_func_import_anim)
     bpy.types.INFO_MT_file_export.append(menu_func_export_mesh)
     bpy.types.INFO_MT_file_export.append(menu_func_export_anim)
     bpy.types.INFO_MT_file_export.append(menu_func_export_batch)
 
 def unregister():
     bpy.utils.unregister_module(__name__)
+    bpy.types.INFO_MT_file_import.remove(menu_func_import_mesh)
+    bpy.types.INFO_MT_file_import.remove(menu_func_import_anim)
     bpy.types.INFO_MT_file_export.remove(menu_func_export_mesh)
     bpy.types.INFO_MT_file_export.remove(menu_func_export_anim)
     bpy.types.INFO_MT_file_export.remove(menu_func_export_batch)
