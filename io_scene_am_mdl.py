@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Animation:Master Model",
     "author": "nemyax",
-    "version": (0, 1, 20150304),
+    "version": (0, 1, 20150711),
     "blender": (2, 7, 3),
     "location": "File > Import-Export",
     "description": "Export Animation:Master .mdl",
@@ -28,11 +28,18 @@ def compat(major, minor, rev):
     v = bpy.app.version
     return v[0] >= major and v[1] >= minor and v[2] >= rev
 
-def do_export(filepath):
+def strip_wires(bm):
+    [bm.verts.remove(v) for v in bm.verts if v.is_wire or not v.link_faces]
+    [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
+    [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3]
+    for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
+    return bm
+
+def do_export(filepath, whiskers):
     objs = [o for o in bpy.data.objects if o.type == 'MESH' and not o.hide]
     if not objs:
         return ("Nothing to export.",{'CANCELLED'})
-    contents = build_mdl(objs)
+    contents = build_mdl(objs, whiskers)
     f = open(filepath, 'w')
     f.write(contents)
     msg = "File \"" + filepath + "\" written successfully."
@@ -46,7 +53,7 @@ def test():
     bm.to_mesh(o.data)
     return ("ok", {'FINISHED'})
 
-def build_mdl(objs):
+def build_mdl(objs, whiskers):
     fluff1 = "ProductVersion=17\r\nRelease=17.0 PC\r\n{}{}{}{}".format(
         tag("POSTEFFECTS"),
         tag("IMAGES"),
@@ -57,7 +64,10 @@ def build_mdl(objs):
         tag("CHOREOGRAPHIES"))
     models = ""
     for o in objs:
-        models += tag("MODEL", format_obj(prep(o)))
+        bm = prep(o)
+        if whiskers:
+            bm = strip_wires(bm)
+        models += tag("MODEL", format_obj(bm))
     contents = tag(
         "MODELFILE",
         fluff1 + tag("OBJECTS", models) + fluff2)
@@ -421,6 +431,146 @@ def tag(label, s=""):
     return "<{0}>\r\n{1}</{0}>\r\n".format(label, s)
 
 ###
+### A:M-friendly mesh tools
+###
+
+def am_copy():
+    sel = [o for o in bpy.context.selected_objects if
+        o.type == 'MESH']
+    for o in sel:
+        bpy.ops.object.mode_set()
+        bpy.ops.object.select_all(action='DESELECT')
+        o.select = True
+        bpy.context.scene.objects.active = o
+        bpy.ops.object.duplicate()
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_mode(type='EDGE')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.bevel(offset=0.001)
+        bpy.ops.mesh.select_mode(type='FACE')
+        bpy.ops.mesh.select_all(action='INVERT')
+        bpy.ops.mesh.region_to_loop()
+        bpy.ops.mesh.edge_collapse()
+        bpy.ops.mesh.select_all(action='DESELECT')
+        bpy.ops.mesh.select_face_by_sides(number=5, type='GREATER')
+        ### hatching
+        bpy.ops.mesh.bevel(offset=10.0, offset_type='PERCENT')
+        bpy.ops.mesh.select_mode(type='EDGE')
+        bpy.ops.mesh.select_mode(type='FACE')
+        bpy.ops.mesh.select_mode(type='EDGE')
+        bpy.ops.mesh.select_mode(type='FACE')
+        bpy.ops.mesh.dissolve_faces()
+        bpy.ops.mesh.hatch_face()
+        ### end hatching
+        bpy.ops.mesh.vertices_smooth(repeat=10)
+        bpy.ops.object.mode_set()
+    return {'FINISHED'}
+
+def hatch(fi, bm):
+    if compat(2, 73, 0):
+        bm.faces.ensure_lookup_table()
+        bm.verts.ensure_lookup_table()
+    f = bm.faces[fi]
+    vs = [v.index for v in f.verts if
+        len(v.link_edges) == 3 and
+        v.is_manifold]
+    if vs and len(vs) >= 2:
+        vs = vs[1:] + [vs[0]] # turn ccw - usually needed
+        if len(vs) % 2:
+            vs.pop()
+        l = len(vs)
+        a = l // 2
+        b = l // 4
+        c = a - b
+        vs1 = vs[:a]
+        vs2 = vs[a:]
+        fsts1 = vs1[:b]
+        fsts2 = vs2[:b]
+        fsts2.reverse()
+        snds1 = vs1[b:]
+        snds2 = vs2[b:]
+        snds2.reverse()
+        es = []
+        conn0 = [snds2]
+        for p in zip(fsts1, fsts2):
+            v1 = bm.verts[p[0]]
+            v2 = bm.verts[p[1]]
+            data = bmesh.ops.connect_verts(bm, verts=[v1, v2])
+            e = data['edges'][0]
+            data0 = bmesh.ops.bisect_edges(bm, edges=[e], cuts=c)
+            new_vs = [v.index for v in data0['geom_split'] if
+                v in bm.verts]
+            new_vs0 = []
+            l = fsts1
+            while new_vs:
+                if compat(2, 73, 0):
+                    bm.faces.ensure_lookup_table()
+                    bm.verts.ensure_lookup_table()
+                nxt = [v for v in new_vs if
+                    bm.verts[v].link_edges[0].
+                        other_vert(bm.verts[v]).index in l or
+                    bm.verts[v].link_edges[1].
+                        other_vert(bm.verts[v]).index in l][0]
+                new_vs0.append(nxt)
+                l = [new_vs.pop(new_vs.index(nxt))]
+            conn0.append(new_vs0)
+        conn0.append(snds1)
+        conn1 = []
+        for i in range(c):
+            conn1.append([])
+            for n in range(len(conn0)):
+                conn1[-1].append(conn0[n][i])
+        for l in conn1:
+            v1 = l.pop()
+            while l:
+                v2 = l.pop()
+                vl = [bm.verts[v1], bm.verts[v2]]
+                bmesh.ops.connect_verts(bm, verts=vl)
+                v1 = v2
+        #~ sm = set()
+        for l in conn0[1:-1]:
+            for v in l:
+                for f in bm.verts[v].link_faces:
+                    f.select = True
+                    #~ [sm.add(i) for i in f.verts]
+        #~ for i in range(10):
+            #~ bmesh.ops.smooth_vert(bm, verts=list(sm), factor=1.0)
+        bm.verts.index_update()
+        bm.faces.index_update()
+        bm.edges.index_update()
+    return bm
+
+###
+### Ops
+###
+
+class AMMesh(bpy.types.Operator):
+    '''Make an Animation:Master-ready copy of a mesh.'''
+    bl_idname = "mesh.am_mesh"
+    bl_label = 'Make A:M-Friendly Copy'
+    bl_options = {'PRESET'}
+    def execute(self, context):
+        return am_copy()
+
+class HatchFace(bpy.types.Operator):
+    '''Cut a hatch pattern of edges across a face.'''
+    bl_idname = "mesh.hatch_face"
+    bl_label = 'Hatch Face'
+    bl_options = {'PRESET'}
+    def execute(self, context):
+        bpy.ops.object.mode_set()
+        bpy.ops.object.mode_set(mode='EDIT')
+        m = context.active_object.data
+        bm = bmesh.from_edit_mesh(m)
+        sel = [f.index for f in bm.faces if f.select]
+        for f in bm.faces:
+            f.select = False
+        for i in sel:
+            bm = hatch(i, bm)
+            bmesh.update_edit_mesh(m)
+        return {'FINISHED'}
+
+###
 ### UI
 ###
 
@@ -432,26 +582,57 @@ class ExportAMMdl(bpy.types.Operator, ExportHelper):
     filename_ext = ".mdl"
     filter_glob = StringProperty(
         default="*.mdl",
-        options={'HIDDEN'},
-        )
+        options={'HIDDEN'})
     path_mode = path_reference_mode
     check_extension = True
     path_mode = path_reference_mode
+    whiskers = BoolProperty(
+        name="Add tails",
+        default=True,
+        description="Add tails where patches end or splines become discontinuous")
     def execute(self, context):
-        msg, result = do_export(self.filepath)
+        msg, result = do_export(self.filepath, self.whiskers)
         if result == {'CANCELLED'}:
             self.report({'ERROR'}, msg)
         print(msg)
         return result
+
+class AMFriendlyTools(bpy.types.Panel):
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'TOOLS'
+    bl_idname = "VIEW3D_PT_AMFriendly"
+    bl_label = "A:M Middleman"
+
+    @classmethod
+    def poll(cls, context):
+        return (context.object.type == 'MESH')
+
+    def draw(self, context):
+        col = self.layout.column()
+        col.operator("mesh.am_mesh")
+        if context.mode == 'EDIT_MESH' \
+            and context.tool_settings.mesh_select_mode[2]:
+            col.operator("mesh.hatch_face")
 
 def menu_func_export_bin(self, context):
     self.layout.operator(
         ExportAMMdl.bl_idname, text="Animation:Master Model (.mdl)")
 
 def register():
-    bpy.utils.register_module(__name__)
+    #~ bpy.utils.register_module(__name__)
+    bpy.utils.register_class(ExportAMMdl)
+    bpy.utils.register_class(AMMesh)
+    bpy.utils.register_class(HatchFace)
+    bpy.utils.register_class(AMFriendlyTools)
     bpy.types.INFO_MT_file_export.append(menu_func_export_bin)
 
 def unregister():
-    bpy.utils.unregister_module(__name__)
+    #~ bpy.utils.unregister_module(__name__)
+    bpy.utils.unregister_class(ExportAMMdl)
+    bpy.utils.unregister_class(AMMesh)
+    bpy.utils.unregister_class(HatchFace)
+    bpy.utils.unregister_class(AMFriendlyTools)
     bpy.types.INFO_MT_file_export.remove(menu_func_export_bin)
+
+if __name__ == "__main__":
+    register()
