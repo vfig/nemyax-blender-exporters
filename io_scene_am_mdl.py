@@ -64,10 +64,7 @@ def build_mdl(objs, whiskers):
         tag("CHOREOGRAPHIES"))
     models = ""
     for o in objs:
-        bm = prep(o)
-        if whiskers:
-            bm = strip_wires(bm)
-        models += tag("MODEL", format_obj(bm))
+        models += tag("MODEL", format_obj(prep(o, whiskers)))
     contents = tag(
         "MODELFILE",
         fluff1 + tag("OBJECTS", models) + fluff2)
@@ -110,7 +107,7 @@ def validate(bm, mtx0):
     bm.transform(mtx1)
     return bm
 
-def prep(obj):
+def prep(obj, whiskers):
     bm = bmesh.new()
     bm.from_object(obj, bpy.context.scene)
     bm = validate(bm, obj.matrix_world)
@@ -126,9 +123,9 @@ def prep(obj):
         e.tag = True
         pred_v = e.verts[0]
         succ_v = e.verts[1]
-        is_open, bm = walk_forward(succ_v, e, bm)
+        is_open, bm = walk_forward(succ_v, e, bm, whiskers)
         if is_open:
-            starter, bm = walk_backward(pred_v, e, bm)
+            starter, bm = walk_backward(pred_v, e, bm, whiskers)
             starters.append(starter)
         else:
             starters.append(e)
@@ -182,7 +179,7 @@ def do_face(f, bm):
         f[fls] += 1
     return bm
 
-def walk_forward(v, e, bm):
+def walk_forward(v, e, bm, whiskers):
     start = e
     succ = bm.edges.layers.int.active
     pred = bm.edges.layers.float.active
@@ -202,26 +199,29 @@ def walk_forward(v, e, bm):
             pt2 = v.co
             pt3 = pt2 + pt2 - pt1
             v3  = bm.verts.new(pt3)
-            v4  = bm.verts.new(pt3)
             ne1 = bm.edges.new((v, v3))
-            ne2 = bm.edges.new((v3, v4))
             ne1.tag = True
-            ne2.tag = True
             bm.verts.index_update()
             bm.edges.index_update()
             ne1i = ne1.index
-            ne2i = ne2.index
             old_e[succ] = ne1i
-            ne1[succ]   = ne2i
+            ne1[succ]   = -1 # dead end
             ne1[pred]   = float(old_e.index)
-            ne2[succ]   = -1 # dead end
-            ne2[pred]   = float(ne1i)
+            if whiskers:
+                v4  = bm.verts.new(pt3)
+                ne2 = bm.edges.new((v3, v4))
+                bm.verts.index_update()
+                bm.edges.index_update()
+                ne2.tag   = True
+                ne1[succ] = ne2.index # override
+                ne2[succ] = -1 # dead end
+                ne2[pred] = float(ne1i)
             return (True, bm)
         old_e[succ] = e.index
         e[pred] = float(old_e.index)
         v = e.other_vert(v)
 
-def walk_backward(v, e, bm):
+def walk_backward(v, e, bm, whiskers):
     succ = bm.edges.layers.int.active
     pred = bm.edges.layers.float.active
     while True:
@@ -230,19 +230,23 @@ def walk_backward(v, e, bm):
         e.tag = True
         e = next_e(v, e)
         if not e:
-            v1 = old_e.other_vert(old_v)
-            pt1 = v1.co
-            pt2 = old_v.co
-            pt3 = pt2 + pt2 - pt1
-            v3 = bm.verts.new(pt3)
-            ne = bm.edges.new((v, v3))
-            ne.tag = True
-            bm.verts.index_update()
-            bm.edges.index_update()
-            ne[succ] = old_e.index
-            ne[pred] = -1.0
-            old_e[pred] = float(ne.index)
-            return (ne, bm)
+            if whiskers:
+                v1 = old_e.other_vert(old_v)
+                pt1 = v1.co
+                pt2 = old_v.co
+                pt3 = pt2 + pt2 - pt1
+                v3 = bm.verts.new(pt3)
+                ne = bm.edges.new((v, v3))
+                ne.tag = True
+                bm.verts.index_update()
+                bm.edges.index_update()
+                ne[succ] = old_e.index
+                ne[pred] = -1.0
+                old_e[pred] = float(ne.index)
+                return ne, bm
+            else:
+                old_e[pred] = -1.0
+                return old_e, bm
         v = e.other_vert(v)
         e[succ] = old_e.index
         old_e[pred] = float(e.index)
@@ -339,15 +343,17 @@ def fused_with(e, bm):
 
 def cp_v(e, bm):
     pred = bm.edges.layers.float.active
+    succ = bm.edges.layers.int.active
     if compat(2, 73, 0):
         bm.edges.ensure_lookup_table()
     v1, v2 = e.verts
     pei = int(e[pred])
     if pei < 0:
-        if len(v1.link_edges) == 1:
-            return v1
-        else:
+        vs = bm.edges[e[succ]].verts
+        if v1 in vs:
             return v2
+        else:
+            return v1
     if v1 in bm.edges[pei].verts:
         return v1
     else:
