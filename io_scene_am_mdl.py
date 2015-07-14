@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Animation:Master Model",
     "author": "nemyax",
-    "version": (0, 1, 20150711),
+    "version": (0, 1, 20150713),
     "blender": (2, 7, 3),
     "location": "File > Import-Export",
     "description": "Export Animation:Master .mdl",
@@ -9,6 +9,17 @@ bl_info = {
     "wiki_url": "",
     "tracker_url": "",
     "category": "Import-Export"}
+
+### CP info
+# Edges represent spline CPs. CP-related information is stored
+# in the bmesh edge collection's string layer, as follows:
+#  edge[cp_info][0:4]    successor CP index as a LE signed int ('<i')
+#  edge[cp_info][4:8]    predecessor CP index as a LE signed int ('<i')
+#  edge[cp_info][8:12]   "core" vertex index as a LE signed int ('<i')
+#  edge[cp_info][12]     whether the spline loops after this CP
+#  edge[cp_info][13]     whether this CP starts the spline
+# All CP indexes are 0-based, Blender style, and incremented only
+# during MDL formatting.
 
 import bpy
 import bmesh
@@ -29,9 +40,9 @@ def compat(major, minor, rev):
     return v[0] >= major and v[1] >= minor and v[2] >= rev
 
 def strip_wires(bm):
-    [bm.verts.remove(v) for v in bm.verts if v.is_wire or not v.link_faces]
-    [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
     [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3]
+    [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
+    [bm.verts.remove(v) for v in bm.verts if not v.link_edges[:]]
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
     return bm
 
@@ -49,7 +60,7 @@ def do_export(filepath, whiskers):
 
 def test():
     o = bpy.context.active_object
-    bm = prep(o)
+    bm = prep(o, True)
     bm.to_mesh(o.data)
     return ("ok", {'FINISHED'})
 
@@ -59,7 +70,7 @@ def build_mdl(objs, whiskers):
         tag("IMAGES"),
         tag("SOUNDS"),
         tag("MATERIALS"))
-    fluff2 = "{}{}FileInfoPos=\r\n".format(
+    fluff2 = "{}{}".format(
         tag("ACTIONS"),
         tag("CHOREOGRAPHIES"))
     models = ""
@@ -68,16 +79,13 @@ def build_mdl(objs, whiskers):
     contents = tag(
         "MODELFILE",
         fluff1 + tag("OBJECTS", models) + fluff2)
-    return fix_info(contents)
+    return contents
 
 def format_obj(bm):
     mesh = do_splines(bm)
     mesh += do_patches(bm)
     fluff1 = "Name=Decal1\r\nTranslate=0.0 0.0\r\nScale=100.0 100.0\r\n"
     fluff2 = "Name=Stamp1\r\n"
-    fluff3 = tag(
-        "FileInfo",
-        "LastModifiedBy=\r\n")
     decals = tag(
         "DECAL",
         fluff1 + tag(
@@ -85,36 +93,63 @@ def format_obj(bm):
                 "STAMPS",
                 tag("STAMP", fluff2 + do_uvs(bm))))
     bm.free()
-    return tag("MESH", mesh) + tag("DECALS", decals) + fluff3
+    return tag("MESH", mesh) + tag("DECALS", decals)
 
 def validate(bm, mtx0):
+    bm = strip_wires(bm)
     [bm.faces.remove(f) for f in bm.faces if
         len(f.verts) > 5]
-    [bm.edges.remove(e) for e in bm.edges if
-        not e.link_faces[:]]
-    [bm.verts.remove(v) for v in bm.verts if
-        not v.link_edges[:]]
-    bm.verts.index_update()
-    bm.edges.index_update()
-    bm.faces.index_update()
+    for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
     bm.loops.layers.int.verify()
-    bm.edges.layers.int.verify()    # "next" edges
-    bm.edges.layers.float.verify()  # "previous" edges
-    bm.edges.layers.string.verify() # whether loop is closed
+    cp_info = bm.edges.layers.string.verify() # see "CP info" note above
+    for e in bm.edges:
+        e[cp_info] = bytes(14)
     bm.faces.layers.int.verify()
     bm.verts.layers.int.verify()
     mtx1 = mtx0 * mu.Matrix.Rotation(math.radians(-90.0), 4, 'X')
     bm.transform(mtx1)
     return bm
 
+def set_succ(e, cp_info, val):
+    bstr = e[cp_info]
+    e[cp_info] = struct.pack("<i", val) + bstr[4:]
+
+def set_pred(e, cp_info, val):
+    bstr = e[cp_info]
+    e[cp_info] = bstr[:4] + struct.pack("<i", val) + bstr[8:]
+
+def set_vert(e, cp_info, val):
+    bstr = e[cp_info]
+    e[cp_info] = bstr[:8] + struct.pack("<i", val) + bstr[12:]
+
+def set_loop(e, cp_info, val):
+    bstr = e[cp_info]
+    e[cp_info] = bstr[:12] + struct.pack("b", val) + bstr[13:]
+
+def set_init(e, cp_info, val):
+    bstr = e[cp_info]
+    e[cp_info] = bstr[:13] + struct.pack("b", val)
+
+def get_succ(e, cp_info):
+    return struct.unpack('<i', e[cp_info][:4])[0]
+
+def get_vert(e, cp_info):
+    return struct.unpack('<i', e[cp_info][4:8])[0]
+
+def get_vert(e, cp_info):
+    return struct.unpack('<i', e[cp_info][8:12])[0]
+
+def get_loop(e, cp_info):
+    return e[cp_info][12]
+
+def get_init(e, cp_info):
+    return e[cp_info][13]
+
 def prep(obj, whiskers):
     bm = bmesh.new()
     bm.from_object(obj, bpy.context.scene)
     bm = validate(bm, obj.matrix_world)
-    succ = bm.edges.layers.int.active
-    pred = bm.edges.layers.float.active
     uvc  = bm.verts.layers.int.active
-    starters = []
     es = bm.edges[:]
     while es:
         e = es.pop(0)
@@ -125,14 +160,7 @@ def prep(obj, whiskers):
         succ_v = e.verts[1]
         is_open, bm = walk_forward(succ_v, e, bm, whiskers)
         if is_open:
-            starter, bm = walk_backward(pred_v, e, bm, whiskers)
-            starters.append(starter)
-        else:
-            starters.append(e)
-    for e in bm.edges:
-        e.tag = False
-    for e in starters:
-        e.tag = True
+            bm = walk_backward(pred_v, e, bm, whiskers)
     for f in bm.faces:
         bm = do_face(f, bm)
     for v in bm.verts:
@@ -153,9 +181,9 @@ def min_cp(f, bm):
     return result
 
 def do_face(f, bm):
-    succ = bm.edges.layers.int.active
-    cp   = bm.loops.layers.int.active
-    fls  = bm.faces.layers.int.active
+    cp_info = bm.edges.layers.string.active
+    cp      = bm.loops.layers.int.active
+    fls     = bm.faces.layers.int.active
     if compat(2, 73, 0):
         bm.edges.ensure_lookup_table()
     flip = 8
@@ -164,7 +192,7 @@ def do_face(f, bm):
     for l in ls:
         pl = l.link_loop_prev
         ple = pl.edge
-        plen = ple[succ]
+        plen = get_succ(ple, cp_info)
         if l.vert in bm.edges[plen].verts:
             l[cp] = plen
         else:
@@ -181,75 +209,83 @@ def do_face(f, bm):
 
 def walk_forward(v, e, bm, whiskers):
     start = e
-    succ = bm.edges.layers.int.active
-    pred = bm.edges.layers.float.active
-    cl   = bm.edges.layers.string.active
+    cp_info = bm.edges.layers.string.active
     while True:
         e.tag = True
+        set_vert(e, cp_info, e.other_vert(v).index)
         old_e = e
         old_v = v
         e = next_e(v, e)
         if e == start:
-            old_e[succ] = e.index
-            e[pred] = float(old_e.index)
-            old_e[cl] = b"c" # full circle
+            set_succ(old_e, cp_info, e.index)
+            set_pred(e, cp_info, old_e.index)
+            set_loop(old_e, cp_info, True) # full circle
+            set_init(start, cp_info, True)
             return (False, bm)
         if not e:
-            pt1 = old_e.other_vert(v).co
-            pt2 = v.co
-            pt3 = pt2 + pt2 - pt1
-            v3  = bm.verts.new(pt3)
-            ne1 = bm.edges.new((v, v3))
+            v0 = old_e.other_vert(v)
+            pt0 = v0.co
+            pt1 = v.co
+            pt2 = pt1 + pt1 - pt0
+            v2  = bm.verts.new(pt2)
+            ne1 = bm.edges.new((v, v2))
             ne1.tag = True
+            ne1[cp_info] = bytes(14)
             bm.verts.index_update()
             bm.edges.index_update()
             ne1i = ne1.index
-            old_e[succ] = ne1i
-            ne1[succ]   = -1 # dead end
-            ne1[pred]   = float(old_e.index)
+            set_succ(old_e, cp_info, ne1i)
+            set_succ(ne1, cp_info, -1) # dead end
+            set_pred(ne1, cp_info, old_e.index)
+            set_vert(ne1, cp_info, v.index)
             if whiskers:
-                v4  = bm.verts.new(pt3)
-                ne2 = bm.edges.new((v3, v4))
+                v3  = bm.verts.new(pt2)
+                ne2 = bm.edges.new((v2, v3))
+                ne2[cp_info] = bytes(14)
                 bm.verts.index_update()
                 bm.edges.index_update()
-                ne2.tag   = True
-                ne1[succ] = ne2.index # override
-                ne2[succ] = -1 # dead end
-                ne2[pred] = float(ne1i)
+                ne2.tag = True
+                set_succ(ne1, cp_info, ne2.index) # override
+                set_succ(ne2, cp_info, -1)  # dead end
+                set_pred(ne2, cp_info, ne1i)
+                set_vert(ne2, cp_info, v2.index)
             return (True, bm)
-        old_e[succ] = e.index
-        e[pred] = float(old_e.index)
         v = e.other_vert(v)
+        set_succ(old_e, cp_info, e.index)
+        set_pred(e, cp_info, old_e.index)
 
 def walk_backward(v, e, bm, whiskers):
-    succ = bm.edges.layers.int.active
-    pred = bm.edges.layers.float.active
+    cp_info = bm.edges.layers.string.active
     while True:
+        set_vert(e, cp_info, v.index)
         old_e = e
-        old_v = v
         e.tag = True
         e = next_e(v, e)
         if not e:
             if whiskers:
-                v1 = old_e.other_vert(old_v)
-                pt1 = v1.co
-                pt2 = old_v.co
-                pt3 = pt2 + pt2 - pt1
-                v3 = bm.verts.new(pt3)
-                ne = bm.edges.new((v, v3))
-                ne.tag = True
+                v0 = old_e.other_vert(v)
+                pt0 = v0.co
+                pt1 = v.co
+                pt2 = pt1 + pt1 - pt0
+                v2 = bm.verts.new(pt2)
+                ne = bm.edges.new((v, v2))
+                ne[cp_info] = bytes(13)
                 bm.verts.index_update()
                 bm.edges.index_update()
-                ne[succ] = old_e.index
-                ne[pred] = -1.0
-                old_e[pred] = float(ne.index)
-                return ne, bm
+                ne.tag = True
+                set_succ(ne, cp_info, old_e.index)
+                set_pred(ne, cp_info, -1)
+                set_vert(ne, cp_info, v2.index)
+                set_pred(old_e, cp_info, ne.index)
+                set_init(ne, cp_info, True)
+                return bm
             else:
-                old_e[pred] = -1.0
-                return old_e, bm
+                set_pred(old_e, cp_info, -1)
+                set_init(old_e, cp_info, True)
+                return bm
         v = e.other_vert(v)
-        e[succ] = old_e.index
-        old_e[pred] = float(e.index)
+        set_succ(e, cp_info, old_e.index)
+        set_pred(old_e, cp_info, e.index)
     
 def next_e(v, e):
     all_es = v.link_edges[:]
@@ -280,35 +316,39 @@ def next_e(v, e):
         return [e0 for e0 in all_es if
             e0 not in fs[0].edges][0]
     if tne == 2 and tnf > 1:
+        #~ if all_es[0] == e:
+            #~ result = all_es[1]
+        #~ else:
+            #~ result = all_es[0]
+        #~ if not result.tag:
+            #~ return result
         if all_es[0] == e:
-            result = all_es[1]
+            return all_es[1]
         else:
-            result = all_es[0]
-        if not result.tag:
-            return result
+            return all_es[0]
 
 def do_splines(bm):
-    starters = [e for e in bm.edges if e.tag]
+    cp_info = bm.edges.layers.string.active
+    starters = [e for e in bm.edges if get_init(e, cp_info)]
     result = ""
     for s in starters:
         result += do_spline(s.index, bm)
     return result
 
 def do_spline(s, bm):
-    succ = bm.edges.layers.int.active
-    cl   = bm.edges.layers.string.active
+    cp_info = bm.edges.layers.string.active
     uvc  = bm.verts.layers.int.active
     if compat(2, 73, 0):
         bm.edges.ensure_lookup_table()
     result = ""
     e = bm.edges[s]
     while s >= 0:
-        next_s = e[succ]
-        closed_loop = bool(e[cl])
+        next_s = get_succ(e, cp_info)
+        closed_loop = get_loop(e, cp_info)
         #~ magic = 262145 + closed_loop * 4
         magic = 1 + closed_loop * 4
         other = fused_with(e, bm)
-        v = cp_v(e, bm)
+        v = bm.verts[get_vert(e, cp_info)]
         ei = e.index
         if other != None and v[uvc] != ei:
             result += "{} 1 {} {} . .\r\n".format(
@@ -324,41 +364,20 @@ def do_spline(s, bm):
     return tag("SPLINE", result)
 
 def fanout(v, bm):
-    pred = bm.edges.layers.float.active
-    if compat(2, 73, 0):
-        bm.edges.ensure_lookup_table()
-    es = v.link_edges
-    eis = [e.index for e in es]
-    result = []
-    for e in es:
-        pei = int(e[pred])
-        if pei in eis:
-            result.append(e.index)
-    return result
+    cp_info = bm.edges.layers.string.active
+    vi = v.index
+    return [e.index for e in v.link_edges if get_vert(e, cp_info) == vi]
 
 def fused_with(e, bm):
-    es = fanout(cp_v(e, bm), bm)
-    if es and len(es) > 1:
+    if compat(2, 73, 0):
+        bm.verts.ensure_lookup_table()
+    cp_info = bm.edges.layers.string.active
+    vi = get_vert(e, cp_info)
+    v = bm.verts[vi]
+    es = fanout(v, bm)
+    if len(es) > 1:
         return (es * 2)[es.index(e.index) + 1]
 
-def cp_v(e, bm):
-    pred = bm.edges.layers.float.active
-    succ = bm.edges.layers.int.active
-    if compat(2, 73, 0):
-        bm.edges.ensure_lookup_table()
-    v1, v2 = e.verts
-    pei = int(e[pred])
-    if pei < 0:
-        vs = bm.edges[e[succ]].verts
-        if v1 in vs:
-            return v2
-        else:
-            return v1
-    if v1 in bm.edges[pei].verts:
-        return v1
-    else:
-        return v2
-    
 def do_patches(bm):
     patches = ""
     cp = bm.loops.layers.int.active
