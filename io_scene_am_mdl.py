@@ -26,7 +26,6 @@ import bmesh
 import math
 import mathutils as mu
 import struct
-from struct import pack, unpack
 from bpy.props import (
     StringProperty,
     BoolProperty)
@@ -39,32 +38,16 @@ def compat(major, minor, rev):
     v = bpy.app.version
     return v[0] >= major and v[1] >= minor and v[2] >= rev
 
-def strip_wires(bm):
-    [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3]
-    [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
-    [bm.verts.remove(v) for v in bm.verts if not v.link_edges[:]]
-    for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
-    return bm
-
 def do_export(filepath, whiskers):
-    objs = [o for o in bpy.data.objects if o.type == 'MESH' and not o.hide]
-    if not objs:
-        return ("Nothing to export.",{'CANCELLED'})
-    contents = build_mdl(objs, whiskers)
+    obj = bpy.context.active_object
+    contents = build_mdl(obj, whiskers)
     f = open(filepath, 'w')
     f.write(contents)
     msg = "File \"" + filepath + "\" written successfully."
-    #~ test()
     result = {'FINISHED'}
     return (msg, result)
 
-def test():
-    o = bpy.context.active_object
-    bm = prep(o, True)
-    bm.to_mesh(o.data)
-    return ("ok", {'FINISHED'})
-
-def build_mdl(objs, whiskers):
+def build_mdl(from_what, whiskers):
     fluff1 = "ProductVersion=17\r\nRelease=17.0 PC\r\n{}{}{}{}".format(
         tag("POSTEFFECTS"),
         tag("IMAGES"),
@@ -73,9 +56,7 @@ def build_mdl(objs, whiskers):
     fluff2 = "{}{}".format(
         tag("ACTIONS"),
         tag("CHOREOGRAPHIES"))
-    models = ""
-    for o in objs:
-        models += tag("MODEL", format_obj(prep(o, whiskers)))
+    models = tag("MODEL", format_obj(prep(from_what, whiskers)))
     contents = tag(
         "MODELFILE",
         fluff1 + tag("OBJECTS", models) + fluff2)
@@ -95,11 +76,21 @@ def format_obj(bm):
     bm.free()
     return tag("MESH", mesh) + tag("DECALS", decals)
 
-def validate(bm, mtx0):
-    bm = strip_wires(bm)
-    [bm.faces.remove(f) for f in bm.faces if
-        len(f.verts) > 5]
+def recreate(bm):
+    [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3 or len(f.verts) > 5]
+    [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
+    [bm.verts.remove(v) for v in bm.verts if not v.link_edges[:]]
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
+    mesh = bpy.data.meshes.new("bm")
+    bm.to_mesh(mesh)
+    bm.clear()
+    bm.from_mesh(mesh)
+    bpy.data.meshes.remove(mesh)
+    return bm
+    
+
+def validate(bm, mtx0):
+    bm = recreate(bm)
     bm.loops.layers.int.verify()
     cp_info = bm.edges.layers.string.verify() # see "CP info" note above
     for e in bm.edges:
@@ -316,12 +307,6 @@ def next_e(v, e):
         return [e0 for e0 in all_es if
             e0 not in fs[0].edges][0]
     if tne == 2 and tnf > 1:
-        #~ if all_es[0] == e:
-            #~ result = all_es[1]
-        #~ else:
-            #~ result = all_es[0]
-        #~ if not result.tag:
-            #~ return result
         if all_es[0] == e:
             return all_es[1]
         else:
@@ -345,8 +330,7 @@ def do_spline(s, bm):
     while s >= 0:
         next_s = get_succ(e, cp_info)
         closed_loop = get_loop(e, cp_info)
-        #~ magic = 262145 + closed_loop * 4
-        magic = 1 + closed_loop * 4
+        magic = 1 + closed_loop * 4 # also tried 262145 instead of 1
         other = fused_with(e, bm)
         v = bm.verts[get_vert(e, cp_info)]
         ei = e.index
@@ -552,14 +536,10 @@ def hatch(fi, bm):
                 vl = [bm.verts[v1], bm.verts[v2]]
                 bmesh.ops.connect_verts(bm, verts=vl)
                 v1 = v2
-        #~ sm = set()
         for l in conn0[1:-1]:
             for v in l:
                 for f in bm.verts[v].link_faces:
                     f.select = True
-                    #~ [sm.add(i) for i in f.verts]
-        #~ for i in range(10):
-            #~ bmesh.ops.smooth_vert(bm, verts=list(sm), factor=1.0)
         bm.verts.index_update()
         bm.faces.index_update()
         bm.edges.index_update()
@@ -622,6 +602,26 @@ class ExportAMMdl(bpy.types.Operator, ExportHelper):
         print(msg)
         return result
 
+class MaybeExportAMMdl(bpy.types.Operator):
+    '''Export the active mesh as an Animation:Master Model File'''
+    bl_idname = "export_scene.maybe_am_mdl"
+    bl_label = 'Export MDL'
+    def invoke(self, context, event):
+        obj = bpy.context.active_object
+        if not obj:
+            msg = "No active object; nothing to export.\n"
+            msg += "Select a mesh object and try again."
+            print(msg)
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+        if obj.type != "MESH":
+            msg = "The active object is not a mesh; cannot export.\n"
+            msg += "Select a mesh object and try again."
+            print(msg)
+            self.report({'ERROR'}, msg)
+            return {'CANCELLED'}
+        return bpy.ops.export_scene.am_mdl('INVOKE_DEFAULT')
+
 class AMFriendlyTools(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'TOOLS'
@@ -641,10 +641,10 @@ class AMFriendlyTools(bpy.types.Panel):
 
 def menu_func_export_bin(self, context):
     self.layout.operator(
-        ExportAMMdl.bl_idname, text="Animation:Master Model (.mdl)")
+        MaybeExportAMMdl.bl_idname, text="Animation:Master Model (.mdl)")
 
 def register():
-    #~ bpy.utils.register_module(__name__)
+    bpy.utils.register_class(MaybeExportAMMdl)
     bpy.utils.register_class(ExportAMMdl)
     bpy.utils.register_class(AMMesh)
     bpy.utils.register_class(HatchFace)
@@ -652,7 +652,7 @@ def register():
     bpy.types.INFO_MT_file_export.append(menu_func_export_bin)
 
 def unregister():
-    #~ bpy.utils.unregister_module(__name__)
+    bpy.utils.unregister_class(MaybeExportAMMdl)
     bpy.utils.unregister_class(ExportAMMdl)
     bpy.utils.unregister_class(AMMesh)
     bpy.utils.unregister_class(HatchFace)
