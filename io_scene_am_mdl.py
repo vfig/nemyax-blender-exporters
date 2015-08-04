@@ -523,9 +523,11 @@ def tag_weights(bm):
 def norm_weights(bm):
     wts = bm.verts.layers.deform.active
     for v in bm.verts:
-        r = 1.0 / (sum(v[wts].values()))
-        for k in v[wts].keys():
-            v[wts][k] = v[wts][k] * r
+        total = sum(v[wts].values())
+        if total:
+            r = 1.0 / total
+            for k in v[wts].keys():
+                v[wts][k] = v[wts][k] * r
     return bm
 
 def group_weights(obj, bm, arm):
