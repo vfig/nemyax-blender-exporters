@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Animation:Master Model",
     "author": "nemyax",
-    "version": (0, 1, 20150715),
+    "version": (0, 2, 20150804),
     "blender": (2, 7, 3),
     "location": "File > Import-Export",
     "description": "Export Animation:Master .mdl",
@@ -26,6 +26,7 @@ import bmesh
 import math
 import mathutils as mu
 import struct
+import random
 from bpy.props import (
     StringProperty,
     BoolProperty)
@@ -38,7 +39,17 @@ def compat(major, minor, rev):
     v = bpy.app.version
     return v[0] >= major and v[1] >= minor and v[2] >= rev
 
+def correct():
+    return mu.Matrix((
+        (-1.0, 0.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0, 0.0),
+        (0.0, 1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0, 1.0)))
+
 def do_export(filepath, whiskers):
+    if bpy.context.mode == 'EDIT_MESH':
+        bpy.ops.object.mode_set()
+        bpy.ops.object.mode_set(mode='EDIT') # make sure edits are applied
     obj = bpy.context.active_object
     contents = build_mdl(obj, whiskers)
     f = open(filepath, 'w')
@@ -48,7 +59,9 @@ def do_export(filepath, whiskers):
     return (msg, result)
 
 def build_mdl(from_what, whiskers):
-    fluff1 = "ProductVersion=17\r\nRelease=17.0 PC\r\n{}{}{}{}".format(
+    bm = bmesh.new()
+    bm.from_mesh(from_what.data)
+    fluff1 = "ProductVersion=17\nRelease=17.0 PC\n{}{}{}{}".format(
         tag("POSTEFFECTS"),
         tag("IMAGES"),
         tag("SOUNDS"),
@@ -56,25 +69,26 @@ def build_mdl(from_what, whiskers):
     fluff2 = "{}{}".format(
         tag("ACTIONS"),
         tag("CHOREOGRAPHIES"))
-    models = tag("MODEL", format_obj(prep(from_what, whiskers)))
+    models = tag("MODEL", format_obj(from_what, prep(from_what, bm, whiskers)))
     contents = tag(
         "MODELFILE",
         fluff1 + tag("OBJECTS", models) + fluff2)
     return contents
 
-def format_obj(bm):
+def format_obj(obj, bm):
     mesh = do_splines(bm)
     mesh += do_patches(bm)
-    fluff1 = "Name=Decal1\r\nTranslate=0.0 0.0\r\nScale=100.0 100.0\r\n"
-    fluff2 = "Name=Stamp1\r\n"
+    fluff1 = "Name=Decal1\nTranslate=0.0 0.0\nScale=100.0 100.0\n"
+    fluff2 = "Name=Stamp1\n"
     decals = tag(
         "DECAL",
         fluff1 + tag(
             "DECALIMAGES") + tag(
                 "STAMPS",
                 tag("STAMP", fluff2 + do_uvs(bm))))
+    bone_part = maybe_bones(obj, bm)
     bm.free()
-    return tag("MESH", mesh) + tag("DECALS", decals)
+    return tag("MESH", mesh) + tag("DECALS", decals) + bone_part
 
 def recreate(bm):
     [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3 or len(f.verts) > 5]
@@ -87,7 +101,6 @@ def recreate(bm):
     bm.from_mesh(mesh)
     bpy.data.meshes.remove(mesh)
     return bm
-    
 
 def validate(bm, mtx0):
     bm = recreate(bm)
@@ -97,8 +110,7 @@ def validate(bm, mtx0):
         e[cp_info] = bytes(14)
     bm.faces.layers.int.verify()
     bm.verts.layers.int.verify()
-    mtx1 = mtx0 * mu.Matrix.Rotation(math.radians(-90.0), 4, 'X')
-    bm.transform(mtx1)
+    bm.transform(correct())
     return bm
 
 def set_succ(e, cp_info, val):
@@ -124,7 +136,7 @@ def set_init(e, cp_info, val):
 def get_succ(e, cp_info):
     return struct.unpack('<i', e[cp_info][:4])[0]
 
-def get_vert(e, cp_info):
+def get_pred(e, cp_info):
     return struct.unpack('<i', e[cp_info][4:8])[0]
 
 def get_vert(e, cp_info):
@@ -136,9 +148,7 @@ def get_loop(e, cp_info):
 def get_init(e, cp_info):
     return e[cp_info][13]
 
-def prep(obj, whiskers):
-    bm = bmesh.new()
-    bm.from_object(obj, bpy.context.scene)
+def prep(obj, bm, whiskers):
     bm = validate(bm, obj.matrix_world)
     uvc  = bm.verts.layers.int.active
     es = bm.edges[:]
@@ -202,7 +212,7 @@ def walk_forward(v, e, bm, whiskers):
     start = e
     cp_info = bm.edges.layers.string.active
     while True:
-        e.tag = True
+        e.tag = True # tag means CP's taken; prevents spline branching
         set_vert(e, cp_info, e.other_vert(v).index)
         old_e = e
         old_v = v
@@ -218,7 +228,7 @@ def walk_forward(v, e, bm, whiskers):
             pt0 = v0.co
             pt1 = v.co
             pt2 = pt1 + pt1 - pt0
-            v2  = bm.verts.new(pt2)
+            v2  = bm.verts.new(pt2, v)
             ne1 = bm.edges.new((v, v2))
             ne1.tag = True
             ne1[cp_info] = bytes(14)
@@ -230,7 +240,7 @@ def walk_forward(v, e, bm, whiskers):
             set_pred(ne1, cp_info, old_e.index)
             set_vert(ne1, cp_info, v.index)
             if whiskers:
-                v3  = bm.verts.new(pt2)
+                v3  = bm.verts.new(pt2, v)
                 ne2 = bm.edges.new((v2, v3))
                 ne2[cp_info] = bytes(14)
                 bm.verts.index_update()
@@ -258,7 +268,7 @@ def walk_backward(v, e, bm, whiskers):
                 pt0 = v0.co
                 pt1 = v.co
                 pt2 = pt1 + pt1 - pt0
-                v2 = bm.verts.new(pt2)
+                v2 = bm.verts.new(pt2, v)
                 ne = bm.edges.new((v, v2))
                 ne[cp_info] = bytes(13)
                 bm.verts.index_update()
@@ -304,13 +314,17 @@ def next_e(v, e):
         return [e0 for e0 in all_es if
             len(e0.link_faces[:]) == 2][0]
     if tnf == 2 and tne in (3, 4) and nf == 1:
-        return [e0 for e0 in all_es if
-            e0 not in fs[0].edges][0]
+        es = [e0 for e0 in all_es if
+            e0 not in fs[0].edges and not e0.tag]
+        if es:
+            return es[0]
     if tne == 2 and tnf > 1:
         if all_es[0] == e:
-            return all_es[1]
+            result = all_es[1]
         else:
-            return all_es[0]
+            result = all_es[0]
+        if not result.tag:
+            return result
 
 def do_splines(bm):
     cp_info = bm.edges.layers.string.active
@@ -335,11 +349,11 @@ def do_spline(s, bm):
         v = bm.verts[get_vert(e, cp_info)]
         ei = e.index
         if other != None and v[uvc] != ei:
-            result += "{} 1 {} {} . .\r\n".format(
+            result += "{} 1 {} {} . .\n".format(
                 magic, ei + 1, other + 1)
         else:
             x, y, z = v.co
-            result += "{} 0 {} {:.6f} {:.6f} {:.6f} . .\r\n".format(
+            result += "{} 0 {} {:.6f} {:.6f} {:.6f} . .\n".format(
                 magic, ei + 1, x, y, z)
         if closed_loop:
             break
@@ -383,10 +397,10 @@ def do_patches(bm):
             l = l.link_loop_prev
         for val in edges + normals0:
             entry += str(val) + " "
-        entry += "0\r\n"
+        entry += "0\n"
         patches += entry
     for (x, y, z) in ns:
-        normals += "{:.6f} {:.6f} {:.6f}\r\n".format(x, y, z)
+        normals += "{:.6f} {:.6f} {:.6f}\n".format(x, y, z)
     return tag("PATCHES", patches) + tag("NORMALS", normals)
 
 def do_uvs(bm):
@@ -427,17 +441,113 @@ def do_uvs(bm):
             entry += str(p)
         for i in uvs:
             entry += " {:.6f}".format(i)
-        entry += "\r\n"
+        entry += "\n"
         result += entry
     return tag("DATA", result)
 
-def fix_info(s):
-    pos = s.find("\n<FileInfo>")
-    a = "FileInfoPos="
-    return (s.replace(a, a + str(pos))).replace("\r", "")
-
 def tag(label, s=""):
-    return "<{0}>\r\n{1}</{0}>\r\n".format(label, s)
+    return "<{0}>\n{1}</{0}>\n".format(label, s)
+
+###
+### Bone export
+###
+
+def maybe_bones(obj, bm):
+    arm_o = obj.find_armature()
+    if arm_o:
+        return do_bones(obj, bm, arm_o.data)
+    else:
+        return ""
+
+def do_bones(obj, bm, arm):
+    result = ""
+    bones = arm.bones
+    bm, lookup = group_weights(obj, tag_weights(norm_weights(bm)), arm)
+    for root in [b for b in bones if not b.parent]:
+        result += do_bone(root, lookup, bm)
+    return tag("BONES", result)
+
+def do_bone(b, lookup, bm):
+    name = b.name
+    wts = bm.verts.layers.deform.active
+    cp_info = bm.edges.layers.string.active
+    result = "<SEGMENT>\nName={}\n".format(name)
+    if name in lookup:
+        gi, cps = lookup[name]
+        if cps["abs"]:
+            att = ""
+            for cp in cps["abs"]:
+                att += "{}\n".format(cp + 1)
+            result += tag("NONSKINNEDCPS", att)
+        if cps["rel"]:
+            if compat(2, 73, 0):
+                bm.verts.ensure_lookup_table()
+                bm.edges.ensure_lookup_table()
+            wtd = ""
+            for cp in cps["rel"]:
+                vi = get_vert(bm.edges[cp], cp_info)
+                wtd += "{} {}\n".format(cp + 1, bm.verts[vi][wts][gi])
+            result += tag("WEIGHTEDCPS", wtd)
+    cmtx = correct()
+    s = cmtx * b.head_local
+    e = cmtx * b.tail_local
+    rc = random.randint(0, 255)
+    gc = random.randint(0, 255)
+    bc = random.randint(0, 255)
+    roll = b.matrix.to_euler()[1]
+    quat = mu.Euler((0.0, 0.0, roll)).to_quaternion()
+    quat.rotate((e - s).to_track_quat('Z', 'Y'))
+    qw, qx, qy, qz = quat
+    result += "BoneColor={} {} {} 255\n".format(rc, gc, bc)
+    result += "Start={} {} {}\n".format(s[0], s[1], s[2])
+    result += "End={} {} {}\n".format(e[0], e[1], e[2])
+    result += "Length={}\n".format(b.length)
+    result += "Rotate={} {} {} {}\n".format(qx, qy, qz, qw) # w is last in A:M
+    if b.parent and b.use_connect:
+        result += "Chained=TRUE\n"
+    for ch in b.children:
+        result += do_bone(ch, lookup, bm)
+    result += "</SEGMENT>\n"
+    return result
+
+def tag_weights(bm):
+    cp_info = bm.edges.layers.string.active
+    wt_tags = bm.verts.layers.string.verify()
+    if compat(2, 73, 0):
+        bm.verts.ensure_lookup_table()
+    for e in bm.edges:
+        core_vi = get_vert(e, cp_info)
+        bm.verts[core_vi][wt_tags] += struct.pack("<i", e.index)
+    return bm
+
+def norm_weights(bm):
+    wts = bm.verts.layers.deform.active
+    for v in bm.verts:
+        r = 1.0 / (sum(v[wts].values()))
+        for k in v[wts].keys():
+            v[wts][k] = v[wts][k] * r
+    return bm
+
+def group_weights(obj, bm, arm):
+    vgs = obj.vertex_groups
+    wts = bm.verts.layers.deform.active
+    wt_tags = bm.verts.layers.string.active
+    temp = {}
+    for a in range(len(vgs)):
+        temp[a] = {"rel":[],"abs":[]}
+    attached = set()
+    for v in [a for a in bm.verts if a[wt_tags]]:
+        tag_bin = v[wt_tags]
+        fmt = "<{}i".format(len(tag_bin) // 4)
+        cp = min(list(struct.unpack(fmt, tag_bin)))
+        for g in v[wts].keys():
+            kw = "rel" if cp in attached else "abs"
+            attached.add(cp)
+            temp[g][kw].append(cp)
+    result = {}
+    for a in temp:
+        result[vgs[a].name] = (a,temp[a])
+    return bm, result
 
 ###
 ### A:M-friendly mesh tools
@@ -639,7 +749,7 @@ class AMFriendlyTools(bpy.types.Panel):
             and context.tool_settings.mesh_select_mode[2]:
             col.operator("mesh.hatch_face")
 
-def menu_func_export_bin(self, context):
+def menu_func_export_mdl(self, context):
     self.layout.operator(
         MaybeExportAMMdl.bl_idname, text="Animation:Master Model (.mdl)")
 
@@ -649,7 +759,7 @@ def register():
     bpy.utils.register_class(AMMesh)
     bpy.utils.register_class(HatchFace)
     bpy.utils.register_class(AMFriendlyTools)
-    bpy.types.INFO_MT_file_export.append(menu_func_export_bin)
+    bpy.types.INFO_MT_file_export.append(menu_func_export_mdl)
 
 def unregister():
     bpy.utils.unregister_class(MaybeExportAMMdl)
@@ -657,7 +767,7 @@ def unregister():
     bpy.utils.unregister_class(AMMesh)
     bpy.utils.unregister_class(HatchFace)
     bpy.utils.unregister_class(AMFriendlyTools)
-    bpy.types.INFO_MT_file_export.remove(menu_func_export_bin)
+    bpy.types.INFO_MT_file_export.remove(menu_func_export_mdl)
 
 if __name__ == "__main__":
     register()
