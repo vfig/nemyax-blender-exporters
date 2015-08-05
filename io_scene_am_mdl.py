@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Animation:Master Model",
     "author": "nemyax",
-    "version": (0, 2, 20150805),
+    "version": (0, 2, 20150806),
     "blender": (2, 7, 3),
     "location": "File > Import-Export",
     "description": "Export Animation:Master .mdl",
@@ -299,7 +299,7 @@ def next_e(v, e):
         return [e0 for e0 in all_es if
             e0 not in fs[0].edges and
             e0 not in fs[1].edges][0]
-    if tnf == 3 and tne == 4 and \
+    elif tnf == 3 and tne == 4 and \
         not [e for e in all_es if not e.link_faces]:
         if nf == 2:
             return [e0 for e0 in all_es if
@@ -310,15 +310,21 @@ def next_e(v, e):
             return [e0 for e0 in all_es if
                 len(e0.link_faces[:]) == 2 and
                 not e0 in fs[0].edges][0]
-    if not fs and tne == 4:
+    elif not fs and tne == 4:
         return [e0 for e0 in all_es if
             len(e0.link_faces[:]) == 2][0]
-    if tnf == 2 and tne in (3, 4) and nf == 1:
-        es = [e0 for e0 in all_es if
-            e0 not in fs[0].edges and not e0.tag]
-        if es:
-            return es[0]
-    if tne == 2 and tnf > 1:
+    elif tnf == 2 and tne == 3 and nf == 1:
+        return [e0 for e0 in all_es if len(e0.link_faces) == 1 and e0 != e][0]
+    elif tnf == 2 and tne == 4 and nf == 1:
+        lr = [e0 for e0 in all_es if len(e0.link_faces[:]) > 1]
+        es = [e0 for e0 in all_es if e0 not in fs[0].edges]
+        if lr:
+            return [e0 for e0 in es if e0 not in lr][0]
+        else:
+            es0 = [e0 for e0 in es if not e0.tag]
+            if es0:
+                return es0[0]
+    elif tne == 2 and tnf > 1:
         if all_es[0] == e:
             result = all_es[1]
         else:
@@ -455,19 +461,36 @@ def tag(label, s=""):
 def maybe_bones(obj, bm):
     arm_o = obj.find_armature()
     if arm_o:
-        return do_bones(obj, bm, arm_o.data)
+        return do_bones(obj, bm, arm_o)
     else:
         return ""
 
-def do_bones(obj, bm, arm):
+def do_bones(obj, bm, arm_o):
     result = ""
+    arm = arm_o.data
     bones = arm.bones
     bm, lookup = group_weights(obj, tag_weights(norm_weights(bm)), arm)
+    rolls = get_rolls(arm_o)
     for root in [b for b in bones if not b.parent]:
-        result += do_bone(root, lookup, bm)
+        result += do_bone(root, lookup, rolls, bm)
     return tag("BONES", result)
 
-def do_bone(b, lookup, bm):
+def get_rolls(obj):
+    init_active = bpy.context.active_object
+    init_mode = bpy.context.mode
+    bpy.ops.object.mode_set()
+    bpy.context.scene.objects.active = obj
+    result = {}
+    bpy.ops.object.mode_set(mode='EDIT')
+    for eb in obj.data.edit_bones:
+        result[eb.name] = eb.roll
+    bpy.ops.object.mode_set()
+    bpy.context.scene.objects.active = init_active
+    if init_mode == 'EDIT_MESH':
+        bpy.ops.object.mode_set(mode='EDIT')
+    return result
+
+def do_bone(b, lookup, rolls, bm):
     name = b.name
     wts = bm.verts.layers.deform.active
     cp_info = bm.edges.layers.string.active
@@ -494,7 +517,7 @@ def do_bone(b, lookup, bm):
     rc = random.randint(0, 255)
     gc = random.randint(0, 255)
     bc = random.randint(0, 255)
-    roll = b.matrix.to_euler()[1]
+    roll = rolls[name]
     quat = mu.Euler((0.0, 0.0, roll)).to_quaternion()
     quat.rotate((e - s).to_track_quat('Z', 'Y'))
     qw, qx, qy, qz = quat
@@ -506,7 +529,7 @@ def do_bone(b, lookup, bm):
     if b.parent and b.use_connect:
         result += "Chained=TRUE\n"
     for ch in b.children:
-        result += do_bone(ch, lookup, bm)
+        result += do_bone(ch, lookup, rolls, bm)
     result += "</SEGMENT>\n"
     return result
 
