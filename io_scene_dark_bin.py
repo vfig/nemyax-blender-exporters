@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 1, 20150225),
-    "blender": (2, 7, 3),
+    "version": (0, 1, 20150818),
+    "blender": (2, 7, 4),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
     "warning": "",
@@ -68,15 +68,6 @@ def get_string(bs):
 
 class SubobjectImported(object):
     def __init__(self, bs, faceRefs, faces, materials, vhots):
-        #~ self.name   = get_string(bs[:8])
-        #~ self.motion = bs[8]
-        #~ self.parm   = unpack('<i', bs[9:13])[0]
-        #~ self.min   = unpack('<f', bs[13:17])[0]
-        #~ self.max   = unpack('<f', bs[17:21])[0]
-        #~ self.child  = unpack('<h', bs[69:71])[0]
-        #~ self.next   = unpack('<h', bs[71:73])[0]
-        #~ self.xform  = get_floats(bs[21:69])
-        #~ curVhotsStart, numCurVhots = get_ushorts(bs[73:77])
         self.name   = get_string(bs[:8])
         self.motion, self.parm, self.min, self.max = unpack('<Biff', bs[8:21])
         self.child, self.next  = unpack('<hh', bs[69:73])
@@ -434,14 +425,17 @@ def do_import(fileName):
 # Classes
 
 class Kinematics(object):
-    def __init__(self, parm, matrix, motionType, min, max, child, sibling):
+    def __init__(self, parm, matrix, motionType,
+        min, max, rel):
         self.parm = parm
         self.matrix = matrix
         self.motionType = motionType
         self.min = min
         self.max = max
-        self.child = child
-        self.sibling = sibling
+        self.child = rel['child']
+        self.sibling = rel['next']
+        self.call = rel['call']
+        self.splits = rel['splits']
 
 class MeshDetails(object):
     def __init__(self,
@@ -620,6 +614,12 @@ class Model(object):
                     uvBytes,
                     f.material_index.to_bytes(1, 'little')]))
         return binFaceLists
+    def encodeFaces2(self):
+        result = []
+        for bm in self.meshes:
+            bin_f = bm.faces.layers.string.active
+            result.append ([f[bin_f] for f in bm.faces])
+        return result
     def encodeMaterials(self):
         names = []
         if self.materials:
@@ -648,6 +648,8 @@ def strip_wires(bm):
     [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
     [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3]
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
+    if compat(2, 73, 0):
+        for seq in [bm.verts, bm.faces, bm.edges]: seq.ensure_lookup_table()
     return bm
 
 def concat_bytes(bytesList):
@@ -678,7 +680,7 @@ def encode_ushorts(ushorts):
     return encode('<H', ushorts)
 
 def encode_ubytes(ubytes):
-    return encode('<B', ubytes)
+    return encode('B', ubytes)
 
 def encode_misc(items):
     return concat_bytes([pack(fmt, i) for (fmt, i) in items])
@@ -716,103 +718,87 @@ def max_poly_radius(bm):
         
 # Other functions
 
-def encodeNodes(binFaceLists, model):
-    result = b''
-    addr = 0
-    nodeSizes = []
-    faceAddrChunks = []
-    numSubs = len(binFaceLists)
-    for bfli in range(numSubs):
-        binFaceList = binFaceLists[bfli]
-        k = model.kinem[bfli]
-        mesh = model.meshes[bfli]
-        if k.child == -1 and k.sibling == -1:
-            var = 19
-        else:
-            var = 23
-        nodeSizes.append([3,len(binFaceList)*2+var])
-        sphereBytes = encode_sphere(get_local_bbox_data(mesh))
-        binFaceAddrs = b''
-        for bf in binFaceList:
-            binFaceAddrs += pack('<H', addr)
+def encode_nodes(bin_face_lists, model):
+    addr        = 0
+    node_sizes  = []
+    addr_chunks = []
+    num_subs    = len(bin_face_lists)
+    for bfli in range(num_subs):
+        bfl = bin_face_lists[bfli]
+        node_sizes.append(precalc_node_size(model.kinem[bfli], bfl))
+        bin_face_addrs = b''
+        for bf in bfl:
+            bin_face_addrs += pack('<H', addr)
             addr += len(bf)
-        faceAddrChunks.append(binFaceAddrs)
+        addr_chunks.append(bin_face_addrs)
     result = b''
-    for bfli in range(numSubs):
-        k = model.kinem[bfli]
-        mesh = model.meshes[bfli]
-        result = concat_bytes([
-            result,
-            encode_sub_node(bfli)])
-        if k.child != -1:
-            result = concat_bytes([
-                result,
-                encode_call_node(
-                    binFaceLists,
-                    bfli,
-                    k.child,
-                    mesh,
-                    nodeSizes,
-                    faceAddrChunks[bfli])])
-        elif k.sibling != -1:
-            result = concat_bytes([
-                result,
-                encode_call_node(
-                    binFaceLists,
-                    bfli,
-                    k.sibling,
-                    mesh,
-                    nodeSizes,
-                    faceAddrChunks[bfli])])
+    for bfli in range(num_subs):
+        result += encode_sub_node(bfli)
+        k         = model.kinem[bfli]
+        sphere_bs = encode_sphere(get_local_bbox_data(model.meshes[bfli]))
+        call      = k.call
+        splits    = k.splits
+        nbf       = len(bin_face_lists[bfli])
+        if call >= 0:
+            result += encode_call_node(
+                nbf,
+                sum(node_sizes[:call]),
+                sphere_bs,
+                addr_chunks[bfli])
+        elif splits:
+            ns = len(splits)
+            split_offs1, split_offs2 = \
+                calc_split_offsets(splits, nbf, node_sizes, bfli)
+            ac_list  = [addr_chunks[bfli]] + [b''] * (ns - 1)
+            f_counts = [nbf] + [0] * (ns - 1)
+            for n_back, n_front, nf, addr_chunk in zip(
+                split_offs1, split_offs2, f_counts, ac_list):
+                result += encode_split_node(
+                    nf, sphere_bs, n_back, n_front, addr_chunk)
         else:
-            result = concat_bytes([
-                result,
-                encode_raw_node(
-                    binFaceLists,
-                    bfli,
-                    mesh,
-                    nodeSizes,
-                    faceAddrChunks[bfli])])
-    return result
+            result += encode_raw_node(nbf, sphere_bs, addr_chunks[bfli])
+    node_offs = [sum(node_sizes[:i+1]) for i in range(len(node_sizes))]
+    node_offs.insert(0, 0)
+    return node_offs, result
+
+def calc_split_offsets(splits, nf, node_sizes, idx):
+    offs = [sum(node_sizes[:a]) for a in splits]
+    res1 = []
+    res2 = []
+    pos = offs[idx] + 34 + nf * 2
+    while offs:
+        # o = offs.pop(0)
+        o = offs.pop()
+        if len(offs) == 1:
+            res1.append(o)
+            res2.append(offs.pop())
+        else:
+            res1.append(pos)
+            pos += 31
+            res2.append(o)
+    return res1, res2
+
+def precalc_node_size(k, fl):
+    size_fs = len(fl) * 2
+    if k.call >= 0:
+        return 26 + size_fs
+    splits = k.splits
+    if splits:
+        return 3 + size_fs + 31 * (len(splits) - 1)
+    return 22 + size_fs
 
 def encode_sub_node(index):
-    return concat_bytes([
-        b'\x04',
-        pack('<H', index)])
+    return struct.pack('<BH', 4, index)
 
-def encode_call_node(
-    binFaceLists,
-    index,
-    target,
-    mesh,
-    nodeSizes,
-    binFaceAddrs):
-    nodeOff = sum([sum(x) for x in nodeSizes[:target]])
-    addr = deep_count(binFaceLists[:index])
-    binFaceList = binFaceLists[index]
-    sphereBytes = encode_sphere(get_local_bbox_data(mesh))
-    return concat_bytes([
-        b'\x02',
-        sphereBytes,
-        pack('<H', len(binFaceList)),
-        pack('<H', nodeOff),
-        b'\x00\x00',
-        binFaceAddrs])
+def encode_call_node(nf, off, sphere_bs, addr_chunk):
+    return struct.pack('<B16s3H', 2, sphere_bs, nf, off, 0) + addr_chunk
 
-def encode_raw_node(
-    binFaceLists,
-    index,
-    mesh,
-    nodeSizes,
-    binFaceAddrs):
-    addr = deep_count(binFaceLists[:index])
-    binFaceList = binFaceLists[index]
-    sphereBytes = encode_sphere(get_local_bbox_data(mesh))
-    return concat_bytes([
-        b'\x00',
-        sphereBytes,
-        pack('<H', len(binFaceList)),
-        binFaceAddrs])
+def encode_raw_node(nf, sphere_bs, addr_chunk):
+    return struct.pack('<B16sH', 0, sphere_bs, nf) + addr_chunk
+
+def encode_split_node(nf, sphere_bs, n_back, n_front, addr_chunk):
+    return struct.pack('<B16sHHf3H',
+        1, sphere_bs, nf, 0, 0, n_back, n_front, 0) + addr_chunk
 
 def pack_light(xyz):
     result = 0
@@ -824,20 +810,23 @@ def pack_light(xyz):
         shift -= 10
     return pack('<I', result)
 
-def encode_subobject(model, index):
+def encode_subobject(model, index, nodeOffset):
     name = model.names[index]
     vhotOffset   = deep_count(model.vhots[:index])
     vertOffset   = model.details[index].vertOff
     lightOffset  = model.details[index].lightOff
     normalOffset = model.details[index].normalOff
-    nodeOffset   = index
     numVhots   = model.numVhotsIn(index)
     numVerts   = model.numVertsIn(index)
     numLights  = model.numLightsIn(index)
     numNormals = model.numNormalsIn(index)
-    numNodes   = 1
     kinem      = model.kinem[index]
     xform      = kinem.matrix
+    splits     = kinem.splits
+    if splits:
+        numNodes = len(splits) - 1
+    else:
+        numNodes = 1
     return concat_bytes([
         name,
         pack('b', kinem.motionType),
@@ -954,11 +943,12 @@ def build_bin(model):
     vertChunk    = model.encodeVerts()
     lightChunk   = model.encodeLights()
     normalChunk  = model.encodeNormals()
-    nodeChunk    = encodeNodes(binFaceLists, model)
+    nodeOffsets, nodeChunk = encode_nodes(binFaceLists, model)
     faceChunk    = concat_bytes(
         [concat_bytes(l) for l in binFaceLists])
     subsChunk    = concat_bytes(
-        [encode_subobject(model, i) for i in range(model.numMeshes)])
+        [encode_subobject(model, i, nodeOffsets[i])
+            for i in range(model.numMeshes)])
     offsets = {}
     def offs(cs):
         return [sum([len(c) for c in cs[:i+1]]) for i in range(len(cs))]
@@ -1058,18 +1048,33 @@ def combine_meshes(bms, matrices):
         result = append_bmesh(result, bm, matrix)
     return result
     
-def build_hierarchy(root, branches):
-    hier = [[]]
-    [hier.append([]) for x in range(len(branches))]
-    for i in range(len(branches)):
+def build_rels(root, branches):
+    nb = len(branches)
+    hier = [[] for _ in range(nb + 1)]
+    for i in range(nb):
         m = branches[i]
-        finalIndex = i + 1
+        final_idx = i + 1
         if m.parent in branches:
-            hier[branches.index(m.parent)+1].append(finalIndex)
+            hier[branches.index(m.parent)+1].append(final_idx)
         else:
-            hier[0].append(finalIndex)
+            hier[0].append(final_idx)
     [l.append(-1) for l in hier]
-    return hier
+    ns = len(hier)
+    rels = [{'child':-1,'next':-1,'call':-1,'splits':[]}
+        for _ in range(ns)]
+    for i, r, ks in zip(range(ns), rels, hier):
+        n = len(ks)
+        for x in hier:
+            if i in x:
+                r['next'] = x[(x.index(i)+1)]
+                break
+        if n == 2:
+            r['call']   = ks[0]
+            r['child']  = ks[0]
+        elif n > 2:
+            r['splits'] = ks[:-1]
+            r['child']  = ks[0]
+    return rels
 
 def get_motion(obj):
     if not obj:
@@ -1089,24 +1094,17 @@ def get_motion(obj):
             min = max = 0.0
     return (motionType,min,max)
 
-def init_kinematics(objs, hier, matrices):
+def init_kinematics(objs, rels, matrices):
     kinem = []
     for i in range(len(objs)):
-        child = hier[i][0]
-        sibling = -1 # for 0th object
-        for x in hier:
-            if i in x:
-                sibling = x[(x.index(i)+1)]
-                break
-        motionType, min, max = get_motion(objs[i])
+        motion_type, min, max = get_motion(objs[i])
         kinem.append(Kinematics(
             i - 1,
             matrices[i],
-            motionType,
+            motion_type,
             min,
             max,
-            child,
-            sibling))
+            rels[i]))
     return kinem
 
 def categorize_objs(objs):
@@ -1174,8 +1172,8 @@ def prep_meshes(allObjs, materials, worldOrigin):
             vhots[-1].append((vhot.name,vhot.matrix_local.translation))
     for i in range(len(vhots)):
         vhots[i] = [j[1] for j in sorted(vhots[i])]
-    hier = build_hierarchy(root, branches)
-    kinem = init_kinematics([None] + branches, hier, matrices)
+    rels = build_rels(root, branches)
+    kinem = init_kinematics([None] + branches, rels, matrices)
     meshes = [rootMesh]+branchMeshes
     return (names,meshes,vhots,kinem,shift_box(bbox, originShift))
 
