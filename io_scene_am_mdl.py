@@ -1,8 +1,8 @@
 bl_info = {
     "name": "Animation:Master Model",
     "author": "nemyax",
-    "version": (0, 2, 20150806),
-    "blender": (2, 7, 3),
+    "version": (0, 4, 20151003),
+    "blender": (2, 7, 6),
     "location": "File > Import-Export",
     "description": "Export Animation:Master .mdl",
     "warning": "",
@@ -27,6 +27,7 @@ import math
 import mathutils as mu
 import struct
 import random
+import os.path
 from bpy.props import (
     StringProperty,
     BoolProperty)
@@ -46,21 +47,24 @@ def correct():
         (0.0, 1.0, 0.0, 0.0),
         (0.0, 0.0, 0.0, 1.0)))
 
-def do_export(filepath, whiskers):
+def do_export(filepath, opts):
     if bpy.context.mode == 'EDIT_MESH':
         bpy.ops.object.mode_set()
         bpy.ops.object.mode_set(mode='EDIT') # make sure edits are applied
     obj = bpy.context.active_object
-    contents = build_mdl(obj, whiskers)
+    bm = bmesh.new()
+    bm.from_mesh(obj.data, use_shape_key=True)
+    contents = build_mdl(obj, bm, opts)
     f = open(filepath, 'w')
     f.write(contents)
     msg = "File \"" + filepath + "\" written successfully."
+    if opts["shapes"]:
+        maybe_shapes(bm, filepath)
+    bm.free()
     result = {'FINISHED'}
     return (msg, result)
 
-def build_mdl(from_what, whiskers):
-    bm = bmesh.new()
-    bm.from_mesh(from_what.data)
+def build_mdl(obj, bm, opts):
     fluff1 = "ProductVersion=17\nRelease=17.0 PC\n{}{}{}{}".format(
         tag("POSTEFFECTS"),
         tag("IMAGES"),
@@ -69,13 +73,14 @@ def build_mdl(from_what, whiskers):
     fluff2 = "{}{}".format(
         tag("ACTIONS"),
         tag("CHOREOGRAPHIES"))
-    models = tag("MODEL", format_obj(from_what, prep(from_what, bm, whiskers)))
+    models = tag("MODEL", format_obj(obj, prep(obj, bm, opts), opts))
     contents = tag(
         "MODELFILE",
         fluff1 + tag("OBJECTS", models) + fluff2)
     return contents
 
-def format_obj(obj, bm):
+def format_obj(obj, bm, opts):
+    mat_grps = opts["mat_grps"]
     mesh = do_splines(bm)
     mesh += do_patches(bm)
     fluff1 = "Name=Decal1\nTranslate=0.0 0.0\nScale=100.0 100.0\n"
@@ -86,30 +91,30 @@ def format_obj(obj, bm):
             "DECALIMAGES") + tag(
                 "STAMPS",
                 tag("STAMP", fluff2 + do_uvs(bm))))
-    bone_part = maybe_bones(obj, bm)
-    bm.free()
-    return tag("MESH", mesh) + tag("DECALS", decals) + bone_part
+    arm_o = obj.find_armature()
+    bone_part = do_bones(obj, bm, arm_o) if arm_o else ""
+    excl_groups = exclude_groups(arm_o) if arm_o else []
+    gr_part = do_groups(obj, bm, excl_groups, opts)
+    return tag("MESH", mesh) + tag("DECALS", decals) + gr_part + bone_part
 
 def recreate(bm):
     [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3 or len(f.verts) > 5]
     [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
     [bm.verts.remove(v) for v in bm.verts if not v.link_edges[:]]
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
-    mesh = bpy.data.meshes.new("bm")
-    bm.to_mesh(mesh)
-    bm.clear()
-    bm.from_mesh(mesh)
-    bpy.data.meshes.remove(mesh)
+    if compat(2, 73, 0):
+        for seq in [bm.verts, bm.faces, bm.edges]: seq.ensure_lookup_table()
     return bm
 
 def validate(bm, mtx0):
     bm = recreate(bm)
-    bm.loops.layers.int.verify()
     cp_info = bm.edges.layers.string.verify() # see "CP info" note above
     for e in bm.edges:
         e[cp_info] = bytes(14)
     bm.faces.layers.int.verify()
     bm.verts.layers.int.verify()
+    bm.loops.layers.int.new("cp")
+    bm.loops.layers.int.new("flip")
     bm.transform(correct())
     return bm
 
@@ -148,9 +153,10 @@ def get_loop(e, cp_info):
 def get_init(e, cp_info):
     return e[cp_info][13]
 
-def prep(obj, bm, whiskers):
+def prep(obj, bm, opts):
+    whiskers = opts["whiskers"]
     bm = validate(bm, obj.matrix_world)
-    uvc  = bm.verts.layers.int.active
+    link_cp  = bm.verts.layers.int.active
     es = bm.edges[:]
     while es:
         e = es.pop(0)
@@ -167,27 +173,28 @@ def prep(obj, bm, whiskers):
     for v in bm.verts:
         fan = fanout(v, bm)
         if fan:
-            v[uvc] = fan[0]
+            # v[link_cp] = fan[0]
+            v[link_cp] = min(fan)
         else:
-            v[uvc] = -1
+            v[link_cp] = -1
     return bm
 
 def min_cp(f, bm):
-    uvc = bm.verts.layers.int.active
+    link_cp = bm.verts.layers.int.active
     ls = f.loops[:]
     result = ls.pop()
     for l in ls:
-        if l.vert[uvc] < result.vert[uvc]:
+        if l.vert[link_cp] < result.vert[link_cp]:
             result = l
     return result
 
 def do_face(f, bm):
     cp_info = bm.edges.layers.string.active
-    cp      = bm.loops.layers.int.active
+    cp      = bm.loops.layers.int.get("cp")
+    flip    = bm.loops.layers.int.get("flip")
     fls     = bm.faces.layers.int.active
     if compat(2, 73, 0):
         bm.edges.ensure_lookup_table()
-    flip = 8
     ls = f.loops[:]
     nls = len(ls)
     for l in ls:
@@ -197,15 +204,8 @@ def do_face(f, bm):
         if l.vert in bm.edges[plen].verts:
             l[cp] = plen
         else:
-            l.tag = True
+            l[flip] = 1
             l[cp] = ple.index
-    l = min_cp(f, bm)
-    for _ in range(4):
-        f[fls] += flip * l.tag
-        flip *= 2
-        l = l.link_loop_prev
-    if nls == 5:
-        f[fls] += 1
     return bm
 
 def walk_forward(v, e, bm, whiskers):
@@ -342,7 +342,7 @@ def do_splines(bm):
 
 def do_spline(s, bm):
     cp_info = bm.edges.layers.string.active
-    uvc  = bm.verts.layers.int.active
+    link_cp  = bm.verts.layers.int.active
     if compat(2, 73, 0):
         bm.edges.ensure_lookup_table()
     result = ""
@@ -354,7 +354,7 @@ def do_spline(s, bm):
         other = fused_with(e, bm)
         v = bm.verts[get_vert(e, cp_info)]
         ei = e.index
-        if other != None and v[uvc] != ei:
+        if other != None and v[link_cp] != ei:
             result += "{} 1 {} {} . .\n".format(
                 magic, ei + 1, other + 1)
         else:
@@ -384,8 +384,8 @@ def fused_with(e, bm):
 
 def do_patches(bm):
     patches = ""
-    cp = bm.loops.layers.int.active
-    fl = bm.faces.layers.int.active
+    cp = bm.loops.layers.int.get("cp")
+    flip = bm.loops.layers.int.get("flip")
     normals = ""
     ns = set()
     for f in bm.faces:
@@ -395,12 +395,16 @@ def do_patches(bm):
     for f in bm.faces:
         edges = []
         normals0 = []
-        entry = "{} ".format(f[fl])
+        bits = [int(len(f.verts) == 5)]
+        fl_bit = 8
         l = min_cp(f, bm)
         for _ in range(max(4, len(f.edges[:]))):
             edges.append(l[cp] + 1)
+            bits.append(l[flip] * fl_bit)
+            fl_bit *= 2
             normals0.append(ns.index(l.calc_normal()[:]))
             l = l.link_loop_prev
+        entry = "{} ".format(sum(bits[:5]))
         for val in edges + normals0:
             entry += str(val) + " "
         entry += "0\n"
@@ -413,7 +417,7 @@ def do_uvs(bm):
     result = ""
     uv   = bm.loops.layers.uv.verify()
     cp   = bm.loops.layers.int.active
-    uvc  = bm.verts.layers.int.active
+    link_cp  = bm.verts.layers.int.active
     for f in bm.faces:
         ls = f.loops
         nc = len(ls)
@@ -421,7 +425,7 @@ def do_uvs(bm):
         start_l = min_cp(f, bm)
         l = start_l
         for _ in ls:
-            cps.append(l.vert[uvc] + 1)
+            cps.append(l.vert[link_cp] + 1)
             l = l.link_loop_prev
         uvs = []
         l = start_l
@@ -573,6 +577,120 @@ def group_weights(obj, bm, arm):
     for a in temp:
         result[vgs[a].name] = (a,temp[a])
     return bm, result
+
+###
+### CP group export
+###
+
+def exclude_groups(arm_o):
+    return [b.name for b in arm_o.data.bones]
+
+def do_groups(obj, bm, excl_groups, opts):
+    gs = bm.verts.layers.deform.verify()
+    cp_info = bm.edges.layers.string.active
+    link_cp = bm.verts.layers.int.active
+    cpgs = {}
+    cp_lookup = {}
+    for v in bm.verts:
+        vi = v.index
+        cp_lookup[vi] = [e for e in v.link_edges
+            if get_vert(e, cp_info) == vi]
+    mat_map = map_mats(obj) if opts["mat_grps"] else {}
+    for k in mat_map:
+        gn = mat_map[k]
+        es = []
+        for f in [a for a in bm.faces if a.material_index == k]:
+            [es.extend(cp_lookup[v.index]) for v in f.verts]
+        if es:
+            cpgs[gn] = list(set(es))
+    excl_groups.extend(mat_map.values())
+    for vg in obj.vertex_groups:
+        name = vg.name
+        if name not in excl_groups:
+            idx = vg.index
+            cpgs[name] = []
+            for v in bm.verts:
+                if idx in v[gs]:
+                    cpgs[name].extend(cp_lookup[v.index])
+    result = ""
+    for g in cpgs:
+        cp_str = "".join(["{}\n".format(e.index + 1) for e in cpgs[g]])
+        result += tag(
+            "GROUP",
+            "Name={}\n{}".format(g, tag("CPS", cp_str)))
+    return tag("GROUPS", result)
+
+def map_mats(obj):
+    result = {}
+    mss = obj.material_slots
+    for msi in range(len(mss)):
+        ms = mss[msi]
+        mat = ms.material
+        if mat:
+            result[msi] = mat.name
+    return result
+
+###
+### Shape key export
+###
+
+def maybe_shapes(bm, mdl_path):
+    shapes = {}
+    cp_info = bm.edges.layers.string.active
+    link_cp = bm.verts.layers.int.active
+    ks = bm.verts.layers.shape.items()
+    if not ks:
+        return
+    cmtx = correct()
+    for name, li in ks:
+        shapes[name] = [cmtx * v[li] for v in bm.verts]
+    result = {}
+    if compat(2, 73, 0):
+        bm.verts.ensure_lookup_table()
+        bm.edges.ensure_lookup_table()
+    for s in shapes:
+        diff = []
+        for v, m_xyz in zip(bm.verts, shapes[s]):
+            cp = v[link_cp]
+            if cp >= 0:
+                r = bm.edges[cp]
+                while True:
+                    if get_init(r, cp_info):
+                        break
+                    r = bm.edges[get_pred(r, cp_info)]
+                delta = m_xyz - v.co
+                if delta.magnitude > 0.000001:
+                    diff.append((cp,r.index,delta))
+        if diff:
+            result[s] = diff
+    write_actions(result, mdl_path)
+
+def write_actions(sd, mdl_path):
+    dir, mdl = os.path.split(mdl_path)
+    base = "".join(mdl.split(".")[:-1])
+    for a in sd:
+        for bad_char in "\\/:*?\"<>|":
+            a = a.replace(bad_char, "")
+        act_name = base + "-" + a + ".act"
+        act_path = os.path.join(dir, act_name)
+        contents = format_action(a, sd[a], base)
+        f = open(act_path, 'w')
+        f.write(contents)
+        f.close()
+        print("File \"" + act_path + "\" written successfully.")
+
+def format_action(name, data, model):
+    coords = ""
+    for (cp, r, xyz) in data:
+        coords += "{} {} 0 {:.6f} {:.6f} {:.6f}\n".format(
+            cp + 1, r + 1, xyz.x, xyz.y, xyz.z)
+    fluff1 = "ProductVersion=17\nRelease=17.0 PC\n"
+    fluff2 = "DefaultModel={}\n".format(model)
+    return tag("ACTIONFILE",
+        fluff1 + tag("ACTIONS",
+            tag("ACTION",
+                fluff2 + tag("SPLINECONTAINERSHORTCUT",
+                    tag("COMPACTMUSCLECHANNELS", coords)))))
 
 ###
 ### A:M-friendly mesh tools
@@ -730,8 +848,20 @@ class ExportAMMdl(bpy.types.Operator, ExportHelper):
         name="Add tails",
         default=True,
         description="Add tails where patches end or splines become discontinuous")
+    shapes = BoolProperty(
+        name="Export shape keys",
+        default=True,
+        description="Write an action file for every existing shape key")
+    mat_grps = BoolProperty(
+        name="Group CPs by material",
+        default=True,
+        description="Include CP groups based on materials assigned to faces")
     def execute(self, context):
-        msg, result = do_export(self.filepath, self.whiskers)
+        opts = {
+            "whiskers":self.whiskers,
+            "shapes":self.shapes,
+            "mat_grps":self.mat_grps}
+        msg, result = do_export(self.filepath, opts)
         if result == {'CANCELLED'}:
             self.report({'ERROR'}, msg)
         print(msg)
@@ -765,7 +895,7 @@ class AMFriendlyTools(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context):
-        return (context.object.type == 'MESH')
+        return context.object and context.object.type == 'MESH'
 
     def draw(self, context):
         col = self.layout.column()
