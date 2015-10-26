@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Zaloopok",
     "author": "nemyax",
-    "version": (0, 2, 20150520),
+    "version": (0, 3, 20151026),
     "blender": (2, 7, 4),
     "location": "",
     "description": "Adaptations of a few tools from Wings3D",
@@ -12,7 +12,36 @@ bl_info = {
 
 import bpy
 from bpy.props import FloatProperty
-import bmesh, mathutils as mu
+import bmesh, math, mathutils as mu
+
+def put_on(to, at, bm, turn):
+    to_xyz = to.calc_center_median_weighted()
+    at_xyz = at.calc_center_median_weighted()
+    turn_mtx = mu.Matrix.Rotation(math.radians(turn), 4, 'Z')
+    src_mtx = at.normal.to_track_quat('Z', 'Y').to_matrix().to_4x4()
+    trg_mtx = to.normal.to_track_quat('-Z', 'Y').to_matrix().to_4x4()
+    mtx =  mu.Matrix.Translation(to_xyz) * \
+        trg_mtx * turn_mtx * \
+        src_mtx.inverted() * \
+        mu.Matrix.Translation(-at_xyz)
+    piece = extend_region(at, bm)
+    bmesh.ops.transform(bm,
+        matrix=mtx, space=mu.Matrix.Identity(4), verts=piece)
+    return bm
+
+def extend_region(f, bm):
+    inside = set()
+    es = set(f.edges[:])
+    while es:
+        e = es.pop()
+        inside.add(e)
+        les = set(e.verts[0].link_edges[:] + e.verts[1].link_edges[:])
+        les.difference_update(inside)
+        es.update(les)
+    vs = set()
+    for e in inside:
+        vs.update(set(e.verts[:]))
+    return list(vs)
 
 def loop_extension(edge, vert):
     candidates = vert.link_edges[:]
@@ -317,8 +346,8 @@ def circularize(es):
         sum([a[0] for a in crosses]) / n,
         sum([a[1] for a in crosses]) / n,
         sum([a[2] for a in crosses]) / n)).normalized()
-    nrm2 = nrm.cross(center - ovs[0].co)
-    offset = nrm.cross(nrm2)
+    nrm2 = nrm.cross(ovs[0].co - center)
+    offset = -nrm.cross(nrm2)
     offset.magnitude = avg_d
     rot_step = mu.Quaternion(nrm, 6.283185307179586 / (n - 1))
     for v in ovs:
@@ -385,6 +414,14 @@ def rays(v):
 def extract(l, el):
     return l.pop(l.index(el))
 
+class EdgeEq(bpy.types.Operator):
+    '''Equalize the selected contiguous edges.'''
+    bl_idname = "mesh.eq_edges"
+    bl_label = 'Equalize'
+    bl_options = {'PRESET', 'REGISTER'}
+    def execute(self, context):
+        return eq_edges(context)
+
 class ZaloopokView3DPanel(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'TOOLS'
@@ -422,10 +459,13 @@ class ZaloopokView3DPanel(bpy.types.Panel):
                     subcol4.operator("mesh.z_to_edges", text="Edges")
                 if not comp_sel[2]:
                     subcol4.operator("mesh.z_to_faces", text="Faces")
-        col.separator()
-        subcol5 = col.column(align=True)
-        if comp_sel[1]:
-            subcol5.operator("mesh.z_eq_edges", text="Equalize Edges")
+        subcol5 = col.column(align = True)
+        subcol5.separator()
+        subcol5.label("Modify:")
+        subcol5.operator("mesh.z_delete_mode")
+        subcol5.operator("mesh.eq_edges")
+        subcol5.operator("mesh.z_put_on")
+        
     
 class GrowLoop(bpy.types.Operator):
     bl_idname = "mesh.z_grow_loop"
@@ -512,20 +552,9 @@ class ToFaces(bpy.types.Operator):
                 or sm == (False, True, False)))
 
     def execute(self, context):
-        bm = bmesh.from_edit_mesh(context.active_object.data)
-        if context.tool_settings.mesh_select_mode[0]:
-            selection = [v for v in bm.verts if v.select]
-        if context.tool_settings.mesh_select_mode[1]:
-            selection = [e for e in bm.edges if e.select]
+        bpy.ops.mesh.select_mode(use_expand=True, type='FACE')
         context.tool_settings.mesh_select_mode = (False, False, True)
         context.space_data.pivot_point = 'INDIVIDUAL_ORIGINS'
-        for f in bm.faces:
-            f.select = False
-        target_faces = []
-        [target_faces.extend(s.link_faces[:]) for s in selection]
-        for tf in list(set(target_faces)):
-            tf.select_set(True)
-        context.active_object.data.update()
         return {'FINISHED'}
 
 class ToEdges(bpy.types.Operator):
@@ -541,21 +570,9 @@ class ToEdges(bpy.types.Operator):
                 or sm == (False, False, True)))
 
     def execute(self, context):
-        bm = bmesh.from_edit_mesh(context.active_object.data)
-        target_edges = []
-        if context.tool_settings.mesh_select_mode[0]:
-            selection = [v for v in bm.verts if v.select]
-            [target_edges.extend(s.link_edges[:]) for s in selection]
-        if context.tool_settings.mesh_select_mode[2]:
-            selection = [f for f in bm.faces if f.select]
-            [target_edges.extend(s.edges[:]) for s in selection]
+        bpy.ops.mesh.select_mode(use_expand=True, type='FACE')
         context.tool_settings.mesh_select_mode = (False, True, False)
         context.space_data.pivot_point = 'INDIVIDUAL_ORIGINS'
-        for e in bm.edges:
-            e.select = False
-        for te in list(set(target_edges)):
-            te.select_set(True)
-        context.active_object.data.update()
         return {'FINISHED'}
 
 class ToVerts(bpy.types.Operator):
@@ -571,35 +588,69 @@ class ToVerts(bpy.types.Operator):
                 or sm == (False, False, True)))
 
     def execute(self, context):
-        bm = bmesh.from_edit_mesh(context.active_object.data)
-        target_verts = []
-        if context.tool_settings.mesh_select_mode[1]:
-            selection = [e for e in bm.edges if e.select]
-        if context.tool_settings.mesh_select_mode[2]:
-            selection = [f for f in bm.faces if f.select]
-        [target_verts.extend(s.verts[:]) for s in selection]
+        bpy.ops.mesh.select_mode(use_extend=True, type='VERT')
         context.tool_settings.mesh_select_mode = (True, False, False)
         context.space_data.pivot_point = 'MEDIAN_POINT'
-        for v in bm.verts:
-            v.select = False
-        for tv in list(set(target_verts)):
-            tv.select_set(True)
-        context.active_object.data.update()
+        return {'FINISHED'}
+
+class ContextDelete(bpy.types.Operator):
+    bl_idname = "mesh.z_delete_mode"
+    bl_label = "Delete Selection"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        modes = []
+        for a, b in zip(
+            ['VERT','EDGE','FACE'],
+            context.tool_settings.mesh_select_mode[:]):
+            if b:
+                modes.append(a)
+        for m in reversed(modes):
+            bpy.ops.mesh.delete(type=m)
         return {'FINISHED'}
 
 class EdgeEq(bpy.types.Operator):
     '''Equalize the selected contiguous edges.'''
-    bl_idname = "mesh.z_eq_edges"
+    bl_idname = "mesh.eq_edges"
     bl_label = 'Equalize'
-    bl_options = {'PRESET', 'REGISTER'}
+    bl_options = {'PRESET'}
 
     @classmethod
     def poll(cls, context):
         sm = context.tool_settings.mesh_select_mode[:]
-        return (context.mode == 'EDIT_MESH' and sm[1])
+        return (context.mode == 'EDIT_MESH'
+            and (sm == (False, True, False)))
 
     def execute(self, context):
         return eq_edges(context)
+
+class PutOn(bpy.types.Operator):
+    bl_idname = "mesh.z_put_on"
+    bl_label = "Put On"
+    bl_options = {'REGISTER', 'UNDO'}
+    turn = FloatProperty(
+            name="Turn angle",
+            description="Turn by this angle after placing",
+            min=-180.0, max=180.0,
+            default=0.0)
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'EDIT_MESH')
+
+    def execute(self, context):
+        mesh = context.active_object.data
+        bm = bmesh.from_edit_mesh(mesh)
+        sel_fs = [f for f in bm.faces if f.select]
+        where_to = bm.faces.active
+        result = {'CANCELLED'}
+        if len(sel_fs) == 2 and where_to in sel_fs:
+            f1, f2 = sel_fs
+            where_at = f1 if f2 == where_to else f2
+            bm = put_on(where_to, where_at, bm, self.turn)
+            bmesh.update_edit_mesh(mesh)
+            result = {'FINISHED'}
+        return result
 
 def register():
     bpy.utils.register_class(ZaloopokView3DPanel)
@@ -613,6 +664,8 @@ def register():
     bpy.utils.register_class(ToEdges)
     bpy.utils.register_class(ToVerts)
     bpy.utils.register_class(EdgeEq)
+    bpy.utils.register_class(ContextDelete)
+    bpy.utils.register_class(PutOn)
 
 def unregister():
     bpy.utils.unregister_class(ZaloopokView3DPanel)
@@ -626,6 +679,8 @@ def unregister():
     bpy.utils.unregister_class(ToEdges)
     bpy.utils.unregister_class(ToVerts)
     bpy.utils.unregister_class(EdgeEq)
+    bpy.utils.unregister_class(ContextDelete)
+    bpy.utils.unregister_class(PutOn)
 
 if __name__ == "__main__":
     register()
