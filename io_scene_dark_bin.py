@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 2, 20150820),
+    "version": (0, 3, 20160511),
     "blender": (2, 7, 4),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
@@ -13,8 +13,11 @@ bl_info = {
 import bpy
 import bmesh
 import mathutils as mu
+import math
 import re
 import struct
+import os
+import glob
 from struct import pack, unpack
 from bpy.props import (
     StringProperty,
@@ -23,10 +26,6 @@ from bpy_extras.io_utils import (
     ExportHelper,
     ImportHelper,
     path_reference_mode)
-
-def compat(major, minor, rev):
-    v = bpy.app.version
-    return v[0] >= major and v[1] >= minor and v[2] >= rev
 
 ###
 ### Import
@@ -78,11 +77,14 @@ class SubobjectImported(object):
         facesHere = [faces[addr] for addr in faceRefs]
         matsUsed = {}
         for f in facesHere:
-            matsUsed[f.binMat] = materials[f.binMat]
+            m = f.binMat
+            if m != None:
+                matsUsed[m] = materials[m]
         self.faces = facesHere
         self.matsUsed = matsUsed
     def matSlotIndexFor(self, matIndex):
-        return list(self.matsUsed.values()).index(self.matsUsed[matIndex])
+        if matIndex != None:
+            return list(self.matsUsed.values()).index(self.matsUsed[matIndex])
     def localMatrix(self):
         if all(map(lambda x: x == 0.0, self.xform)):
             return mu.Matrix.Identity(4)
@@ -96,7 +98,7 @@ class SubobjectImported(object):
             matrix[2][3] = self.xform[11]
             return matrix
 
-def prep_materials(matBytes, numMats):
+def prep_materials(matBytes, numMats, file_path):
     materials = {}
     stage1 = []
     stage2 = []
@@ -152,7 +154,7 @@ def prep_uvs(uvBytes):
         uvs.append(mu.Vector((u,v)))
     return uvs
 
-def prep_faces(faceBytes, version):
+def prep_faces0(faceBytes, version):
     garbage = 9 + version # magic 12 or 13: v4 has an extra byte at the end
     faces = {}
     faceAddr = 0
@@ -168,6 +170,33 @@ def prep_faces(faceBytes, version):
         else:
             faceEnd = garbage + numVerts * 6
             uvs = get_ushorts(faceBytes[12+numVerts*4:12+numVerts*6])
+        face = FaceImported()
+        face.binVerts = verts
+        face.binUVs = uvs
+        face.binMat = matIndex
+        faces[faceAddr] = face
+        faceAddr += faceEnd
+        faceIndex += 1
+        faceBytes = faceBytes[faceEnd:]
+    return faces
+
+def prep_faces(faceBytes, version):
+    garbage = 9 + version # magic 12 or 13: v4 has an extra byte at the end
+    faces = {}
+    faceAddr = 0
+    faceIndex = 0
+    while len(faceBytes):
+        matIndex = unpack('<H', faceBytes[2:4])[0]
+        type = faceBytes[4] & 3
+        numVerts = faceBytes[5]
+        verts = get_ushorts(faceBytes[12:12+numVerts*2])
+        uvs = []
+        if type == 3:
+            faceEnd = garbage + numVerts * 6
+            uvs.extend(get_ushorts(faceBytes[12+numVerts*4:12+numVerts*6]))
+        else:
+            faceEnd = garbage + numVerts * 4
+            matIndex = None
         face = FaceImported()
         face.binVerts = verts
         face.binUVs = uvs
@@ -244,7 +273,7 @@ def prep_subobjects(subBytes, faceRefs, faces, materials, vhots):
         subBytes = subBytes[93:]
     return subs
 
-def parse_bin(binBytes):
+def parse_bin(binBytes, file_path):
     version = unpack('<I', binBytes[4:8])[0]
     bbox = get_floats(binBytes[24:48])
     numMats = binBytes[66]
@@ -257,7 +286,7 @@ def parse_bin(binBytes):
     normOffset,\
     faceOffset,\
     nodeOffset = get_uints(binBytes[70:106])
-    materials  = prep_materials(binBytes[matOffset:uvOffset], numMats)
+    materials  = prep_materials(binBytes[matOffset:uvOffset], numMats, file_path)
     uvs        = prep_uvs(binBytes[uvOffset:vhotOffset])
     vhots      = prep_vhots(binBytes[vhotOffset:vertOffset])
     verts      = prep_verts(binBytes[vertOffset:lightOffset])
@@ -280,8 +309,7 @@ def build_bmesh(bm, sub, verts):
         bmVerts = []
         for oldIndex in f.binVerts:
             newIndex = aka(oldIndex, verts)[0]
-            if compat(2, 73, 0):
-                bm.verts.ensure_lookup_table()
+            bm.verts.ensure_lookup_table()
             bmVerts.append(bm.verts[newIndex])
         bmVerts.reverse() # flip normal
         try:
@@ -297,12 +325,13 @@ def build_bmesh(bm, sub, verts):
             bm.faces.new(extraVerts)
             f.bmeshVerts = extraVerts
         bm.faces.index_update()
+    bm.faces.ensure_lookup_table()
     for i in range(len(faces)):
-        if compat(2, 73, 0):
-            bm.faces.ensure_lookup_table()
         bmFace = bm.faces[i]
         binFace = faces[i]
-        bmFace.material_index = sub.matSlotIndexFor(binFace.binMat)
+        mi = sub.matSlotIndexFor(binFace.binMat)
+        if mi != None:
+            bmFace.material_index = sub.matSlotIndexFor(binFace.binMat)
     bm.edges.index_update()
     return
 
@@ -356,8 +385,47 @@ def make_bbox(coords):
     bpy.context.scene.objects.link(bbox)
     return bbox
 
-def make_objects(objectData):
-    bbox, subobjects, verts, uvs, mats = objectData
+def load_img(file_path, img_name):
+    dir_path = os.path.dirname(file_path)
+    ps       = os.sep
+    files    = []
+    for n in (glob.glob(dir_path + ps + "*")):
+        nl = os.path.split(n)[-1].lower()
+        if ((nl == "txt") or (nl == "txt16")) and os.path.isdir(n):
+            files.extend(glob.glob(n + ps + "*.???"))
+    if not files:
+        return
+    img_file = None
+    for f in files:
+        fbase = os.path.splitext(os.path.split(f)[-1])[0]
+        if img_name.lower() == fbase.lower():
+            img_file = f
+            break
+    if not img_file:
+        return
+    for t in bpy.data.textures:
+        if t.type == 'IMAGE' and t.image.filepath == img_file:
+            return t
+    img = None
+    for i in bpy.data.images:
+        if i.filepath == img_file:
+            img = i
+            break
+    if not img:
+        img = bpy.data.images.load(img_file)
+    img.mapping = 'UV'
+    tex = bpy.data.textures.new(name=img_file, type='IMAGE')
+    tex.image = img
+    return tex
+
+def apply_tex(mat, tex):
+    for ts in mat.texture_slots:
+        if ts and ts.texture == tex:
+            return
+    mat.active_texture = tex
+
+def make_objects(object_data, file_path):
+    bbox, subobjects, verts, uvs, mats = object_data
     objs = []
     for s in subobjects:
         mesh = make_mesh(s, verts, uvs)
@@ -375,8 +443,8 @@ def make_objects(objectData):
             limits.min_x = s.min
             limits.max_x = s.max
         for v in s.vhots:
-            vhotName = s.name + "-vhot-" + str(v[0])
-            vhot = bpy.data.objects.new(vhotName, None)
+            vhot_name = s.name + "-vhot-" + str(v[0])
+            vhot = bpy.data.objects.new(vhot_name, None)
             bpy.context.scene.objects.link(vhot)
             vhot.parent = obj
             vhot.location = v[1]
@@ -385,16 +453,20 @@ def make_objects(objectData):
         mesh.uv_textures.new()
         for m in s.matsUsed.values():
             bpy.ops.object.material_slot_add()
-            try:
-                existingMat = bpy.data.materials[m[0]]
-                existingMat.translucency = m[1]
-                existingMat.emit = m[2]
-                obj.material_slots[-1].material = existingMat
-            except KeyError:
-                newMat = bpy.data.materials.new(m[0])
-                newMat.translucency = m[1]
-                newMat.emit = m[2]
-                obj.material_slots[-1].material = newMat
+            mat = None
+            mat_name = m[0]
+            for a in bpy.data.materials:
+                if a.name == mat_name:
+                    mat = a
+                    break
+            if not mat:
+                mat = bpy.data.materials.new(mat_name)
+            mat.translucency = m[1]
+            mat.emit = m[2]
+            tex = load_img(file_path, mat_name)
+            if tex:
+                apply_tex(mat, tex)
+            obj.material_slots[-1].material = mat
         objs.append(obj)
     for i in range(len(subobjects)):
         mum = parent_index(i, subobjects)
@@ -403,14 +475,14 @@ def make_objects(objectData):
     make_bbox(bbox)
     return {'FINISHED'}
 
-def do_import(fileName):
-    binData = open(fileName, 'r+b')
+def do_import(file_path):
+    binData = open(file_path, 'r+b')
     binBytes = binData.read(-1)
     typeID = binBytes[:4]
     if typeID == b'LGMD':
-        objectData = parse_bin(binBytes)
-        msg = "File \"" + fileName + "\" loaded successfully."
-        result = make_objects(objectData)
+        object_data = parse_bin(binBytes, file_path)
+        msg = "File \"" + file_path + "\" loaded successfully."
+        result = make_objects(object_data, file_path)
     elif typeID == b'LGMM':
         msg = "The Dark Engine AI mesh format is not supported."
         result = {'CANCELLED'}
@@ -444,8 +516,7 @@ class Model(object):
         clear, bright):
         num_vs = num_uvs = num_lts = num_fs = num_ns = 0
         for bm in meshes:
-            if compat(2, 73, 0):
-                bm.edges.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
             ext_e = bm.edges.layers.string.active
             num_vs0, num_uvs0, num_lts0, num_ns0, num_fs0 = \
                 unpack('<5H', bm.edges[0][ext_e])
@@ -553,8 +624,7 @@ def strip_wires(bm):
     [bm.edges.remove(e) for e in bm.edges if not e.link_faces[:]]
     [bm.faces.remove(f) for f in bm.faces if len(f.edges) < 3]
     for seq in [bm.verts, bm.faces, bm.edges]: seq.index_update()
-    if compat(2, 73, 0):
-        for seq in [bm.verts, bm.faces, bm.edges]: seq.ensure_lookup_table()
+    for seq in [bm.verts, bm.faces, bm.edges]: seq.ensure_lookup_table()
     return bm
 
 def concat_bytes(bs_list):
@@ -618,6 +688,13 @@ def max_poly_radius(bm):
         diam = max([diam,max(list(dists))])
     return diam * 0.5
         
+def calc_center(pts):
+    n = len(pts)
+    x = sum([pt[0] for pt in pts]) / n
+    y = sum([pt[1] for pt in pts]) / n
+    z = sum([pt[2] for pt in pts]) / n
+    return mu.Vector((x,y,z))
+
 # Other functions
 
 def encode_nodes(ext_face_lists, model):
@@ -669,7 +746,6 @@ def calc_split_offsets(splits, nf, node_sizes, idx):
     res2 = []
     pos = offs[idx] + 34 + nf * 2
     while offs:
-        # o = offs.pop(0)
         o = offs.pop()
         if len(offs) == 1:
             res1.append(o)
@@ -717,8 +793,7 @@ def encode_subobject(model, index, node_off):
     vhot_off   = deep_count(model.vhots[:index])
     num_vhots   = len(model.vhots[index])
     bm = model.meshes[index]
-    if compat(2, 73, 0):
-        bm.edges.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
     ext_e = bm.edges.layers.string.active
     num_vs, num_lts, num_ns = \
         unpack('<HxxHHxx', bm.edges[0][ext_e])
@@ -899,43 +974,41 @@ def get_local_bbox_data(mesh):
         (max(xs),max(ys),max(zs)))
 
 def get_mesh(obj, materials): # and tweak materials
-    matSlotLookup = {}
+    mat_slot_lookup = {}
     for i in range(len(obj.material_slots)):
-        maybeMat = obj.material_slots[i].material
-        if maybeMat:
-            matSlotLookup[i] = materials.index(maybeMat)
+        maybe_mat = obj.material_slots[i].material
+        if maybe_mat and (maybe_mat in materials):
+            mat_slot_lookup[i] = materials.index(maybe_mat)
     bm = bmesh.new()
     bm.from_object(obj, bpy.context.scene)
     strip_wires(bm) # goodbye, box tweak hack
-    uvData = bm.loops.layers.uv.verify()
+    uvs = bm.loops.layers.uv.verify()
     for f in bm.faces:
-        origMat = f.material_index
-        if origMat in matSlotLookup.keys():
-            f.material_index = matSlotLookup[origMat]
+        orig_mat = f.material_index
+        if orig_mat in mat_slot_lookup.keys():
+            f.material_index = mat_slot_lookup[orig_mat]
             for c in f.loops:
-                c[uvData].uv[1] = 1.0 - c[uvData].uv[1]
+                c[uvs].uv[1] = 1.0 - c[uvs].uv[1]
     return bm
 
 def append_bmesh(bm1, bm2, matrix):
     bm2.transform(matrix)
-    uvData = bm1.loops.layers.uv.verify()
-    uvDataOrig = bm2.loops.layers.uv.verify()
-    vSoFar = len(bm1.verts)
+    uvs = bm1.loops.layers.uv.verify()
+    uvs_orig = bm2.loops.layers.uv.verify()
+    vs_so_far = len(bm1.verts)
     for v in bm2.verts:
         bm1.verts.new(v.co)
         bm1.verts.index_update()
     for f in bm2.faces:
-        origMat = f.material_index
         try:
-            if compat(2, 73, 0):
-                bm1.verts.ensure_lookup_table()
-                bm1.faces.ensure_lookup_table()
+            bm1.verts.ensure_lookup_table()
+            bm1.faces.ensure_lookup_table()
             nf = bm1.faces.new(
-                [bm1.verts[vSoFar+v.index] for v in f.verts])
+                [bm1.verts[vs_so_far+v.index] for v in f.verts])
         except ValueError:
             continue
         for i in range(len(f.loops)):
-            nf.loops[i][uvData].uv = f.loops[i][uvDataOrig].uv
+            nf.loops[i][uvs].uv = f.loops[i][uvs_orig].uv
             nf.material_index = f.material_index
         bm1.faces.index_update()
     bm2.free()
@@ -1010,28 +1083,28 @@ def init_kinematics(objs, rels, matrices):
     return kinem
 
 def categorize_objs(objs):
-    customBboxes = [o for o in objs if o.name.lower().startswith("bbox")]
+    custom_bboxes = [o for o in objs if o.name.lower().startswith("bbox")]
     bbox = None
-    if customBboxes:
-        bo = customBboxes[0]
+    if custom_bboxes:
+        bo = custom_bboxes[0]
         bm = bo.matrix_world
         bmin = bm * mu.Vector(bo.bound_box[0])
         bmax = bm * mu.Vector(bo.bound_box[6])
         bbox = {min:tuple(bmin),max:tuple(bmax)}
-    for b in customBboxes:
+    for b in custom_bboxes:
         objs.remove(b)
     root = [o for o in objs if o.data.polygons and not (o.parent in objs)]
     gen2 = [o for o in objs if o.data.polygons and o.parent in root]
-    gen3plus = [o for o in objs if
+    gen3_plus = [o for o in objs if
         o.data.polygons and
         o.parent in objs and
         not (o.parent in root)]
-    return (bbox,root,gen2,gen3plus)
+    return (bbox,root,gen2,gen3_plus)
 
-def shift_box(boxData, matrix):
+def shift_box(box_data, matrix):
     return {
-        min:tuple(matrix * mu.Vector(boxData[min])),
-        max:tuple(matrix * mu.Vector(boxData[max]))}
+        min:tuple(matrix * mu.Vector(box_data[min])),
+        max:tuple(matrix * mu.Vector(box_data[max]))}
 
 def tag_vhots(dl):
     ids = {}
@@ -1052,50 +1125,54 @@ def tag_vhots(dl):
             l[i] = (ids[name], pos)
     return dl
 
-def prep_meshes(allObjs, materials, worldOrigin):
-    bbox, root, gen2, gen3plus = categorize_objs(allObjs)
-    gen2meshes = [get_mesh(o, materials) for o in gen2]
-    gen3plusMeshes = [get_mesh(o, materials) for o in gen3plus]
-    branches = gen2 + gen3plus
-    branchMeshes = gen2meshes + gen3plusMeshes
-    rootMesh = combine_meshes(
+def prep_meshes(all_objs, materials, world_origin, bsp):
+    bbox, root, gen2, gen3_plus = categorize_objs(all_objs)
+    gen2_meshes = [get_mesh(o, materials) for o in gen2]
+    gen3_plus_meshes = [get_mesh(o, materials) for o in gen3_plus]
+    branches = gen2 + gen3_plus
+    branch_meshes = gen2_meshes + gen3_plus_meshes
+    root_mesh = combine_meshes(
         [get_mesh(o, materials) for o in root],
         [o.matrix_world for o in root])
-    realBbox = find_common_bbox(
+    real_bbox = find_common_bbox(
         [mu.Matrix.Identity(4)] + [o.matrix_world for o in branches],
-        [rootMesh] + branchMeshes)
+        [root_mesh] + branch_meshes)
     if not bbox:
-        bbox = realBbox
-    if worldOrigin:
-        originShift = mu.Matrix.Identity(4)
+        bbox = real_bbox
+    if world_origin:
+        origin_shift = mu.Matrix.Identity(4)
     else:
-        originShift = mu.Matrix.Translation(
-            (mu.Vector(realBbox[max]) + mu.Vector(realBbox[min])) * -0.5)
+        origin_shift = mu.Matrix.Translation(
+            (mu.Vector(real_bbox[max]) + mu.Vector(real_bbox[min])) * -0.5)
     names = [root[0].name]
     names.extend([o.name for o in gen2])
-    names.extend([o.name for o in gen3plus])
+    names.extend([o.name for o in gen3_plus])
     matrices = [mu.Matrix([[0]*4] * 4)]
-    rootMesh.transform(originShift)
+    root_mesh.transform(origin_shift)
     for i in range(len(gen2)):
         o = gen2[i]
-        matrices.append(originShift * o.matrix_world)
-    for j in range(len(gen3plus)):
-        o = gen3plus[j]
+        matrices.append(origin_shift * o.matrix_world)
+    for j in range(len(gen3_plus)):
+        o = gen3_plus[j]
         matrices.append(o.matrix_local)
     vhots = [[]]
     for o in root:
         for vhot in [e for e in o.children if e.type == 'EMPTY']:
-            mtx = originShift * vhot.matrix_world.translation
+            mtx = origin_shift * vhot.matrix_world.translation
             vhots[-1].append((vhot.name,mtx))
     for o in branches:
         vhots.append([])
         for vhot in [e for e in o.children if e.type == 'EMPTY']:
             vhots[-1].append((vhot.name,vhot.matrix_local.translation))
     vhots = tag_vhots(vhots)
+    if bsp:
+        gen2_meshes = [do_bsp(m) for m in gen2_meshes]
+        gen3_plus_meshes = [do_bsp(m) for m in gen3_plus_meshes]
+        root_mesh = do_bsp(root_mesh)
     rels = build_rels(root, branches)
     kinem = init_kinematics([None] + branches, rels, matrices)
-    meshes = [rootMesh]+branchMeshes
-    return (names,meshes,vhots,kinem,shift_box(bbox, originShift))
+    meshes = [root_mesh]+branch_meshes
+    return (names,meshes,vhots,kinem,shift_box(bbox, origin_shift))
 
 # Each bmesh is extended with custom bytestring data used by the exporter.
 # Edges #0 and #1 carry custom mesh-level attributes.
@@ -1140,8 +1217,7 @@ def extend_verts(off, bm):
         xyz_bs = v[ext_v]
         v_idx = pack('>H', off + v_dict[xyz_bs])
         v[ext_v] = v_idx + xyz_bs
-    if compat(2, 73, 0):
-        bm.edges.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
     bm.edges[0][ext_e] = pack('<H', num_vs)
     bm.edges[1][ext_e] = pack('<H', off)
     return num_vs + off, bm
@@ -1174,8 +1250,7 @@ def extend_loops(uv_off, lt_off, bm):
             uv_co_bs = pack('<ff', uv_co[0], uv_co[1])
             uv_idx = pack('>H', uv_off + uv_dict[uv_co])
             l[ext_l] = uv_idx + uv_co_bs + lt_idx + lt
-    if compat(2, 73, 0):
-        bm.edges.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
     bm.edges[0][ext_e] += pack('<HH', num_uvs, num_lts)
     bm.edges[1][ext_e] += pack('<H', lt_off)
     return num_uvs + uv_off, num_lts + lt_off, bm
@@ -1208,23 +1283,35 @@ def extend_faces(n_off, f_off, bm):
             pack('<HHBBHf', f_idx, tx, 27, num_vs, n_idx, d) + \
             vs + lts + uvs + pack('B', tx)
     num_fs = len(bm.faces)
-    if compat(2, 73, 0):
-        bm.edges.ensure_lookup_table()
+    bm.edges.ensure_lookup_table()
     bm.edges[0][ext_e] += pack('<HH', num_ns, num_fs)
     bm.edges[1][ext_e] += pack('<H', n_off)
     return n_off + num_ns, f_off + num_fs, bm
 
-def do_export(fileName, clear, bright, worldOrigin):
-    materials = [m for m in bpy.data.materials if
-        any([m in [ms.material for ms in o.material_slots]
-            for o in bpy.data.objects])]
+def gather_materials(objs):
+    ms = set()
+    for o in objs:
+        mat_indexes = set()
+        for f in o.data.polygons:
+            mat_indexes.add(f.material_index)
+        slots = o.material_slots
+        for mi in mat_indexes:
+            try:
+                ms.add(slots[mi].material)
+            except:
+                pass
+    return list(ms)
+
+def do_export(file_path, clear, bright, world_origin, bsp):
     objs = [o for o in bpy.data.objects if o.type == 'MESH' and not o.hide]
     if not objs:
         return ("Nothing to export.",{'CANCELLED'})
+    materials = gather_materials(objs)
     names, meshes, vhots, kinem, bbox = prep_meshes(
         objs,
         materials,
-        worldOrigin)
+        world_origin,
+        bsp)
     v_off = uv_off = lt_off = n_off = f_off = 0
     for i in range(len(meshes)):
         bm = meshes[i]
@@ -1241,12 +1328,131 @@ def do_export(fileName, clear, bright, worldOrigin):
         bbox,
         clear,
         bright)
-    binBytes = build_bin(model)
-    f = open(fileName, 'w+b')
-    f.write(binBytes)
-    msg = "File \"" + fileName + "\" written successfully."
-    result = {'FINISHED'}
+    try:
+        binBytes = build_bin(model)
+        f = open(file_path, 'w+b')
+        f.write(binBytes)
+        msg = "File \"" + file_path + "\" written successfully."
+        result = {'FINISHED'}
+    except struct.error:
+        msg = "The model has too many polygons. Export cancelled.\n"
+        result = {'CANCELLED'}
     return (msg,result)
+
+###
+### Sorting: common
+###
+
+def reorder_faces(bm, order):
+    bm0 = bm.copy()
+    bm.clear()
+    uvs = bm.loops.layers.uv.verify()
+    uvs_orig = bm0.loops.layers.uv.verify()
+    for v in bm0.verts:
+        bm.verts.new(v.co)
+        bm.verts.index_update()
+    bm0.faces.ensure_lookup_table()
+    bm0.verts.ensure_lookup_table()
+    bm.verts.ensure_lookup_table()
+    for fi in order:
+        f = bm0.faces[fi]
+        nf = bm.faces.new(
+            [bm.verts[v.index] for v in f.verts])
+        for i in range(len(f.loops)):
+            nf.loops[i][uvs].uv = f.loops[i][uvs_orig].uv
+            nf.material_index = f.material_index
+        bm.faces.index_update()
+    bm.normal_update()
+    bm0.free()
+    return bm
+
+###
+### Sorting: BSP
+###
+
+def walk(paths): # incremented indexes in keys, regular in values
+    path = (0,) # 0 is used for root (index 0 doesn't occur)
+    ps = []
+    ns = []
+    while paths:
+        v = paths[path] + 1
+        neg = path + (-v,) # negative for "is behind"
+        pos = path + (v,)  # positive for "is in front"
+        if neg in paths:
+            path = neg
+        elif pos in paths:
+            path = pos
+        else:
+            if path[-1] >= 0:
+                ps.append(paths.pop(path))
+            else:
+                ns.append(paths.pop(path))
+            path = path[:-1]
+    ps.reverse()
+    ns.reverse()
+    return ps + ns
+
+def do_bsp(bm):
+    all_fs = bm.faces[:]
+    todo = [set(all_fs)]
+    paths = dict(zip([f.index for f in all_fs], [(0,)] * len(all_fs)))
+    while todo:
+        fs = todo.pop(0)
+        f, plane_n, plane_xyz = split_plane(fs, bm)
+        idx = f.index + 1 # regular indexes in keys, incremented in values
+        fs_inner, fs_outer = slash(bm, fs, plane_xyz, plane_n, f, idx, paths)
+        if fs_inner:
+            todo.append(fs_inner)
+        if fs_outer:
+            todo.append(fs_outer)
+    paths_swapped = dict([(paths[i],i) for i in paths])
+    ordered = walk(paths_swapped)
+    return reorder_faces(bm, ordered)
+
+def slash(bm, fs, plane_xyz, plane_n, ref_f, idx, paths):
+    g = set()
+    par = paths[ref_f.index]
+    fs.remove(ref_f)
+    g |= fs
+    for f in fs:
+        for e in f.edges:
+            g.add(e)
+        for v in f.verts:
+            g.add(v)
+    fs_orig = set(bm.faces)
+    bmesh.ops.bisect_plane(
+        bm, geom=list(g), dist=0.05, plane_co=plane_xyz, plane_no=plane_n)
+    fs_new = set(bm.faces)
+    fs_new -= fs_orig
+    fs |= fs_new
+    for f in fs:
+        paths[f.index] = par
+    fs_inner = set()
+    fs_outer = set()
+    for f in fs:
+        fi = f.index
+        a = plane_n.dot(f.calc_center_median() - plane_xyz)
+        if a >= 0: # play with equation
+            paths[fi] = paths[fi] + (idx,)
+            fs_outer.add(f)
+        else:
+            paths[fi] = paths[fi] + (-idx,)
+            fs_inner.add(f)
+    return fs_inner, fs_outer
+
+def split_plane(fs, bm):
+    rated = list(fs)
+    c = calc_center([f.calc_center_median() for f in fs])
+    rated.sort(key=lambda a: rate(a, c))
+    best_f = rated[0]
+    new_plane_n = best_f.normal
+    new_plane_d = find_d(new_plane_n, [v.co for v in best_f.verts])
+    plane_xyz = new_plane_n * -new_plane_d
+    return best_f, new_plane_n, plane_xyz
+
+def rate(f, c):
+    # return -find_d(f.normal, [(v.co - c) for v in f.verts])
+    return (-find_d(f.normal, [(v.co - c) for v in f.verts]),-f.calc_area())
 
 ###
 ### UI
@@ -1287,10 +1493,14 @@ class ExportDarkBin(bpy.types.Operator, ExportHelper):
         name="Use Emission",
         default=True,
         description="Use the Emit values set on materials")
-    worldOrigin = BoolProperty(
+    world_origin = BoolProperty(
         name="Model origin is at world origin",
         default=True,
         description="Otherwise, it is in the center of the geometry")
+    bsp = BoolProperty(
+        name="Use BSP sorting for polygons",
+        default=False,
+        description="May increase the polygon count unpredictably; use only if you need transparency support")
     path_mode = path_reference_mode
     check_extension = True
     path_mode = path_reference_mode
@@ -1299,7 +1509,8 @@ class ExportDarkBin(bpy.types.Operator, ExportHelper):
             self.filepath,
             self.clear,
             self.bright,
-            self.worldOrigin)
+            self.world_origin,
+            self.bsp)
         if result == {'CANCELLED'}:
             self.report({'ERROR'}, msg)
         print(msg)
