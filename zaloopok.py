@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Zaloopok",
     "author": "nemyax",
-    "version": (0, 5, 20160610),
+    "version": (0, 5, 20160615),
     "blender": (2, 7, 6),
     "location": "",
     "description": "Adaptations of a few tools from Wings3D",
@@ -595,52 +595,77 @@ def select_bounded_ring(context):
     mesh.update()
     return {'FINISHED'}
 
-def group(edges):
-    frags = [[]]
-    vs = set()
-    while edges:
-        e0 = edges.pop()
-        frags[-1].append(e0)
-        vs.add(e0.verts[0])
-        vs.add(e0.verts[1])
-        while True:
-            adj = [e for e in edges
-                if e.verts[0] in vs or e.verts[1] in vs]
-            if not adj:
-                frags.append([])
-                vs.clear()
-                break
-            for e in adj:
-                frags[-1].append(e)
-                vs.add(e.verts[0])
-                vs.add(e.verts[1])
-                extract(edges, e)
-    return [a for a in frags if a]
+def extract_mesh_frag(es):
+    frag = set()
+    todo = set()
+    todo.add(es.pop())
+    while todo:
+        e = todo.pop()
+        frag.add(e)
+        v1, v2 = e.verts
+        more = [a for a in v1.link_edges[:]+v2.link_edges[:] if a.select]
+        todo |= (set(more) - frag)
+    return frag
+
+def mesh_frags(bm):
+    todo = set([e for e in bm.edges if e.select])
+    frags = []
+    while todo:
+        frag = extract_mesh_frag(todo)
+        frags.append(frag)
+        todo -= frag
+    return frags
+
+def vert_chain(frag):
+    fst = get_any(frag)
+    e_chain = [fst]
+    v_chain = fst.verts[:]
+    fwd = True
+    while True:
+        end_e = e_chain[-1]
+        end_v = v_chain[-1]
+        ways = [a for a in end_v.link_edges if a in frag]
+        if len(ways) > 2:
+            return None, None
+        elif len(ways) == 1:
+            if fwd:
+                e_chain.reverse()
+                v_chain.reverse()
+                fwd = False
+            else:
+                return False, v_chain
+        else:
+            if end_v == v_chain[0]:
+                return True, v_chain
+            e1, e2 = ways
+            if e1 == end_e:
+                nxt_e = e2
+            else:
+                nxt_e = e1
+            e_chain.append(nxt_e)
+            v_chain.append(nxt_e.other_vert(end_v))
+
+def vert_chains(frags):
+    chains = []
+    for frag in frags:
+        is_closed, chain = vert_chain(frag)
+        if chain:
+            chains.append((is_closed, chain))
+    return chains
 
 def eq_edges(context):
     mesh = context.active_object.data
     bm = bmesh.from_edit_mesh(mesh)
-    frags = group([e for e in bm.edges if e.select])
-    good_frags = [f for f in frags
-        if all([e for e in f
-            if nonstar(e.verts[0]) and nonstar(e.verts[1])])]
-    closed_frags = []
-    open_frags = []
-    while good_frags:
-        f = good_frags.pop()
-        if all([(thru(e.verts[0]) and thru(e.verts[1])) for e in f]):
-            closed_frags.append(f)
+    frags = mesh_frags(bm)
+    for is_closed, chain in vert_chains(frags):
+        if is_closed:
+            circularize(chain)
         else:
-            open_frags.append(f)
-    for f in closed_frags:
-        circularize(f)
-    for f in open_frags:
-        string_along(f)
+            string_along(chain)
     context.active_object.data.update()
     return {'FINISHED'}
 
-def circularize(es):
-    ovs = v_order(es)
+def circularize(ovs):
     n = len(ovs)
     center = mu.Vector((
         sum([v.co[0] for v in ovs]) / n,
@@ -664,73 +689,13 @@ def circularize(es):
         v.co = center + offset
         offset.rotate(rot_step)
 
-def string_along(es):
-    ovs = v_order(es)
+def string_along(ovs):
     step = (ovs[-1].co - ovs[0].co)
     step.magnitude /= (len(ovs) - 1)
     coords = ovs[0].co + step
     for v in ovs[1:-1]:
         v.co = coords
         coords += step
-
-def v_order(es):
-    vs = set()
-    ends = [e for e in es
-        if not thru(e.verts[0]) or not thru(e.verts[1])]
-    if ends:
-        e = ends[0]
-        end_vs = [v for v in e.verts
-            if not thru(v)]
-        res = [end_vs[0]]
-    else:
-        e = es[0]
-        res = [es[0].verts[0]]
-    orig_e = e
-    while True:
-        prev = res[-1]
-        nv, ne = nxt_v(prev, e)
-        res.append(nv)
-        if not ne or ne == orig_e:
-            break
-        e = ne
-    return res
-
-def nxt_v(v, e):
-    nv = e.other_vert(v)
-    es = [a for a in nv.link_edges if e != a and a.select]
-    if es:
-        return nv, es[0]
-    else:
-        return nv, None
-
-def order(vs): # unused
-    res = [vs.pop(0)]
-    while vs:
-        prev = res[-1]
-        e = [a for a in prev.link_edges if a.select][0]
-        nxt = vs.pop(vs.index([v for v in vs if v in e.verts][0]))
-        res.append(nxt)
-    return res
-
-def nonstar(v):
-    return rays(v) < 3
-
-def thru(v):
-    return rays(v) == 2
-
-def rays(v):
-    return len([e for e in v.link_edges if e.select])
-
-def extract(l, el):
-    return l.pop(l.index(el))
-
-class EdgeEq(bpy.types.Operator):
-    '''Equalize the selected contiguous edges.'''
-    bl_idname = "mesh.eq_edges"
-    bl_label = 'Equalize'
-    bl_options = {'PRESET', 'REGISTER'}
-    def execute(self, context):
-        return eq_edges(context)
 
 class GrowLoop(bpy.types.Operator):
     bl_idname = "mesh.z_grow_loop"
@@ -878,7 +843,7 @@ class EdgeEq(bpy.types.Operator):
     '''Equalize the selected contiguous edges.'''
     bl_idname = "mesh.eq_edges"
     bl_label = 'Equalize'
-    bl_options = {'PRESET'}
+    bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
