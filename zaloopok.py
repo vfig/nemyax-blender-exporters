@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Zaloopok",
     "author": "nemyax",
-    "version": (0, 5, 20160615),
+    "version": (0, 6, 20160629),
     "blender": (2, 7, 6),
     "location": "",
     "description": "Adaptations of a few tools from Wings3D",
@@ -243,42 +243,63 @@ def frags_to_chains(frags, uv):
             result.append((is_closed,ch))
     return result
 
-def eq_uv_chain(ch, uv):
+def arrange_uv_chain(ch, uv, equalize):
     is_closed, order = ch
     if is_closed:
-        circ_uv_chain(order, uv)
+        circ_uv_chain(order, uv, equalize)
     else:
-        distrib_uv_chain(order, uv)
+        distrib_uv_chain(order, uv, equalize)
 
-def eq_uv_chains(bm):
+def arrange_uv_chains(bm, equalize):
     uv = bm.loops.layers.uv.active
     chains = frags_to_chains(partial_frags(bm, uv), uv)
     for ch in chains:
-        eq_uv_chain(ch, uv)
+        arrange_uv_chain(ch, uv, equalize)
 
-def circ_uv_chain(order, uv):
+def circ_uv_chain(order, uv, equalize):
     coords = [b[0][uv].uv for b in order]
     n = len(coords)
     c = mu.Vector((
         sum([v[0] for v in coords]) / n,
         sum([v[1] for v in coords]) / n))
-    a = math.radians(360) / (n - 1)
     r = sum([(v-c).magnitude for v in coords]) / n
     s = (order[0][0][uv].uv - c).normalized()
-    for i, ls in zip(range(n + 1), order):
-        co = ((mu.Matrix.Rotation(a*i, 2)) * s) * r + c
+    if equalize:
+        avg = math.radians(360) / (n - 1)
+        if s.angle_signed(coords[1] - c) >= 0:
+            avg *= -1
+        angles = [avg*i for i in range(len(coords))]
+    else:
+        angles = []
+        for co in coords:
+            angles.append(-s.angle_signed(co - c))
+    for a, ls in zip(angles, order):
+        co = ((mu.Matrix.Rotation(a, 2)) * s) * r + c
         for l in ls:
             l[uv].uv = co
 
-def distrib_uv_chain(order, uv):
+def distrib_uv_chain(order, uv, equalize):
     n = len(order)
     s = order[0][0][uv].uv.copy()
     d = order[-1][0][uv].uv - s
-    d.magnitude /= (n - 1)
-    for ls in order:
+    avg = d.copy() / (n - 1)
+    if equalize:
+        vecs = [avg] * (n - 1)
+    else:
+        dist = d.magnitude
+        if not dist:
+            vecs = [mu.Vector((0.0,0.0))] * (n - 1)
+        else:
+            vecs = []
+            for i in range(n - 1):
+                vecs.append(order[i+1][0][uv].uv - order[i][0][uv].uv)
+            total = sum([a.magnitude for a in vecs])
+            for i in range(len(vecs)):
+                vecs[i] = d * (vecs[i].magnitude / total)
+    for ls, vec in zip(order, vecs):
         for a in ls:
             a[uv].uv = s
-        s += d.copy()
+        s += vec
 
 def xform_uv_frags(mtx, geom, bm):
     uv = bm.loops.layers.uv.verify()
@@ -305,6 +326,31 @@ def scale_uv_frags(factor_x, factor_y, frags, bm):
     return xform_uv_frags(mtx, frags, bm)
 
 ### Mesh editing tools
+
+def mirror(bm):
+    copy_lookup = {}
+    orig_faces = bm.faces[:]
+    for f in orig_faces:
+        if f.select:
+            bmcp = bmesh.ops.duplicate(bm, geom=orig_faces)
+            for fcp in bmcp['geom']:
+                if type(fcp) == bmesh.types.BMFace:
+                    fcp.normal_flip()
+            copy_lookup[f] = bmcp
+    for f in copy_lookup:
+        tm = mu.Matrix.Translation(f.calc_center_median())
+        sm = mu.Matrix.Scale(-1.0, 4, f.normal)
+        cp = copy_lookup[f]
+        bmesh.ops.transform(bm,
+            matrix=tm * sm * tm.inverted(),
+            verts=[v for v in cp['geom'] if type(v) == bmesh.types.BMVert])
+        weld_map = {}
+        for v in f.verts:
+            vc = cp['vert_map'][v]
+            weld_map[vc] = v
+        bm.faces.remove(cp['face_map'][f])
+        bm.faces.remove(f)
+        bmesh.ops.weld_verts(bm, targetmap=weld_map)
 
 def put_on(to, at, bm, turn):
     to_xyz = to.calc_center_median_weighted()
@@ -653,19 +699,19 @@ def vert_chains(frags):
             chains.append((is_closed, chain))
     return chains
 
-def eq_edges(context):
+def arrange_edges(context, equalize):
     mesh = context.active_object.data
     bm = bmesh.from_edit_mesh(mesh)
     frags = mesh_frags(bm)
     for is_closed, chain in vert_chains(frags):
         if is_closed:
-            circularize(chain)
+            circularize(chain, equalize)
         else:
-            string_along(chain)
+            string_along(chain, equalize)
     context.active_object.data.update()
     return {'FINISHED'}
 
-def circularize(ovs):
+def circularize(ovs, equalize):
     n = len(ovs)
     center = mu.Vector((
         sum([v.co[0] for v in ovs]) / n,
@@ -684,18 +730,44 @@ def circularize(ovs):
     nrm2 = nrm.cross(ovs[0].co - center)
     offset = -nrm.cross(nrm2)
     offset.magnitude = avg_d
-    rot_step = mu.Quaternion(nrm, 6.283185307179586 / (n - 1))
-    for v in ovs:
+    doublepi = 6.283185307179586
+    if equalize:
+        quats = [mu.Quaternion(nrm, doublepi / (n - 1))] * n
+    else:
+        if not avg_d:
+            quats = [mu.Quaternion((1.0, 0.0, 0.0, 0.0))] * n
+        else:
+            vecs = [ovs[i+1].co - ovs[i].co for i in range(n - 1)]
+            total = sum([vec.magnitude for vec in vecs])
+            quats = []
+            for vec in vecs:
+                a = doublepi * (vec.magnitude / total)
+                quats.append(mu.Quaternion(nrm, a))
+    for v, quat in zip(ovs, quats):
         v.co = center + offset
-        offset.rotate(rot_step)
+        offset.rotate(quat)
 
-def string_along(ovs):
-    step = (ovs[-1].co - ovs[0].co)
-    step.magnitude /= (len(ovs) - 1)
-    coords = ovs[0].co + step
-    for v in ovs[1:-1]:
-        v.co = coords
-        coords += step
+def string_along(ovs, equalize):
+    n = len(ovs)
+    s = ovs[0].co.copy()
+    d = ovs[-1].co - s
+    avg = d / (n - 1)
+    if equalize:
+        vecs = [avg] * n
+    else:
+        dist = d.magnitude
+        if not dist:
+            vecs = [mu.Vector((0.0,0.0,0.0))] * (n - 1)
+        else:
+            vecs = []
+            for i in range(n - 1):
+                vecs.append(ovs[i+1].co - ovs[i].co)
+            total = sum([a.magnitude for a in vecs])
+            for i in range(len(vecs)):
+                vecs[i] = d * (vecs[i].magnitude / total)
+    for v, vec in zip(ovs, vecs):
+        v.co = s
+        s += vec
 
 class GrowLoop(bpy.types.Operator):
     bl_idname = "mesh.z_grow_loop"
@@ -852,7 +924,22 @@ class EdgeEq(bpy.types.Operator):
             and (sm == (False, True, False)))
 
     def execute(self, context):
-        return eq_edges(context)
+        return arrange_edges(context, equalize=True)
+
+class EdgeLineUp(bpy.types.Operator):
+    '''Line up the selected contiguous edges.'''
+    bl_idname = "mesh.line_up_edges"
+    bl_label = 'Line Up'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        sm = context.tool_settings.mesh_select_mode[:]
+        return (context.mode == 'EDIT_MESH'
+            and (sm == (False, True, False)))
+
+    def execute(self, context):
+        return arrange_edges(context, equalize=False)
 
 class EdgeConnect(bpy.types.Operator):
     '''Connect the selected edges.'''
@@ -900,6 +987,22 @@ class PutOn(bpy.types.Operator):
             bmesh.update_edit_mesh(mesh)
             result = {'FINISHED'}
         return result
+
+class Mirror(bpy.types.Operator):
+    bl_idname = "mesh.z_mirror"
+    bl_label = "Mirror"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'EDIT_MESH')
+
+    def execute(self, context):
+        mesh = context.active_object.data
+        bm = bmesh.from_edit_mesh(mesh)
+        mirror(bm)
+        bmesh.update_edit_mesh(mesh)
+        return {'FINISHED'}
 
 ### UV ops
 
@@ -1039,7 +1142,23 @@ class EqualizeUVChains(bpy.types.Operator):
 
     def execute(self, context):
         bm = bmesh.from_edit_mesh(context.active_object.data)
-        eq_uv_chains(bm)
+        arrange_uv_chains(bm, equalize=True)
+        bmesh.update_edit_mesh(context.active_object.data)
+        return {'FINISHED'}
+
+class LineUpUVChains(bpy.types.Operator):
+    bl_idname = "uv.line_up"
+    bl_label = "Line Up UV Chains"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'EDIT_MESH')
+
+    def execute(self, context):
+        bm = bmesh.from_edit_mesh(context.active_object.data)
+        # eq_uv_chains(bm)
+        arrange_uv_chains(bm, equalize=False)
         bmesh.update_edit_mesh(context.active_object.data)
         return {'FINISHED'}
 
@@ -1087,8 +1206,10 @@ class ZaloopokView3DPanel(bpy.types.Panel):
         subcol5.label("Modify:")
         subcol5.operator("mesh.z_delete_mode")
         subcol5.operator("mesh.eq_edges")
+        subcol5.operator("mesh.line_up_edges")
         subcol5.operator("mesh.z_connect")
         subcol5.operator("mesh.z_put_on")
+        subcol5.operator("mesh.z_mirror")
 
 class ZaloopokUVPanel(bpy.types.Panel):
     bl_space_type = 'IMAGE_EDITOR'
@@ -1109,6 +1230,7 @@ class ZaloopokUVPanel(bpy.types.Panel):
         subcol1.separator()
         subcol2 = col.column(align = True)
         subcol2.operator("uv.equalize", text="Equalize")
+        subcol2.operator("uv.line_up", text="Line Up")
 
 def register():
     bpy.utils.register_class(ZaloopokView3DPanel)
@@ -1123,12 +1245,15 @@ def register():
     bpy.utils.register_class(ToEdges)
     bpy.utils.register_class(ToVerts)
     bpy.utils.register_class(EdgeEq)
+    bpy.utils.register_class(EdgeLineUp)
     bpy.utils.register_class(ContextDelete)
     bpy.utils.register_class(PutOn)
+    bpy.utils.register_class(Mirror)
     bpy.utils.register_class(EdgeConnect)
     bpy.utils.register_class(RotateUVFragments)
     bpy.utils.register_class(ScaleUVFragments)
     bpy.utils.register_class(EqualizeUVChains)
+    bpy.utils.register_class(LineUpUVChains)
 
 def unregister():
     bpy.utils.unregister_class(ZaloopokView3DPanel)
@@ -1143,12 +1268,15 @@ def unregister():
     bpy.utils.unregister_class(ToEdges)
     bpy.utils.unregister_class(ToVerts)
     bpy.utils.unregister_class(EdgeEq)
+    bpy.utils.unregister_class(EdgeLineUp)
     bpy.utils.unregister_class(ContextDelete)
     bpy.utils.unregister_class(PutOn)
+    bpy.utils.unregister_class(Mirror)
     bpy.utils.unregister_class(EdgeConnect)
     bpy.utils.unregister_class(RotateUVFragments)
     bpy.utils.unregister_class(ScaleUVFragments)
     bpy.utils.unregister_class(EqualizeUVChains)
+    bpy.utils.unregister_class(LineUpUVChains)
 
 if __name__ == "__main__":
     register()
