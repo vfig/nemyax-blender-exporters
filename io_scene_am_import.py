@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Animation:Master Import",
     "author": "nemyax",
-    "version": (0, 1, 20160628),
+    "version": (0, 1, 20160630),
     "blender": (2, 7, 7),
     "location": "File > Import-Export",
     "description": "Import Animation:Master .mdl",
@@ -38,7 +38,7 @@ def read_mdl(path):
     fh = open(path, "r")
     mdl = fh.readlines()
     fh.close()
-    skip_until(re.compile("<SPLINE>.*"), mdl)
+    skip_until(re.compile("<MESH>.*"), mdl)
     splines = do_splines(mdl)
     skip_until(re.compile("<PATCHES>.*"), mdl)
     patches = do_patches(mdl)
@@ -193,6 +193,7 @@ def do_splines(mdl):
     s_re = re.compile("<SPLINE>.*")
     e_re = re.compile("</SPLINE>.*")
     rx = re.compile("\S+")
+    skip_until(s_re, mdl)
     while s_re.match(mdl[0]):
         mdl.pop(0)
         splines.append(gather_groups(rx, e_re, mdl))
