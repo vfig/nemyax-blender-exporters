@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Animation:Master Import",
     "author": "nemyax",
-    "version": (0, 1, 20160630),
+    "version": (0, 1, 20160701),
     "blender": (2, 7, 7),
     "location": "File > Import-Export",
     "description": "Import Animation:Master .mdl",
@@ -35,19 +35,34 @@ def corr_mtx():
         mu.Matrix.Rotation(math.radians(90.0), 4, 'X')
 
 def read_mdl(path):
-    fh = open(path, "r")
+    fh = open(path, encoding="Windows-1252", mode="r")
     mdl = fh.readlines()
     fh.close()
-    skip_until(re.compile("<MESH>.*"), mdl)
-    splines = do_splines(mdl)
-    skip_until(re.compile("<PATCHES>.*"), mdl)
-    patches = do_patches(mdl)
-    skip_until(re.compile("<BONES>.*"), mdl)
-    bones = do_segments(mdl)
-    skip_until(re.compile("<DECALS>.*"), mdl)
-    uv_patches = do_decals(mdl)
-    skip_until(re.compile("<GROUPS>.*"), mdl)
-    groups = do_groups(mdl)
+    mesh_re    = re.compile("<MESH>.*")
+    patches_re = re.compile("<PATCHES>.*")
+    bones_re   = re.compile("<BONES>.*")
+    decals_re  = re.compile("<DECALS>.*")
+    groups_re  = re.compile("<GROUPS>.*")
+    if skip_until(mesh_re, mdl, patches_re):
+        splines = do_splines(mdl)
+    else:
+        splines = []
+    if skip_until(patches_re, mdl, bones_re):
+        patches = do_patches(mdl)
+    else:
+        patches = []
+    if skip_until(bones_re, mdl, decals_re):
+        bones = do_segments(mdl)
+    else:
+        bones = []
+    if skip_until(decals_re, mdl, groups_re):
+        uv_patches = do_decals(mdl)
+    else:
+        uv_patches = []
+    if skip_until(groups_re, mdl, re.compile("</MODELFILE>.*")):
+        groups = do_groups(mdl)
+    else:
+        groups = {}
     return splines, patches, uv_patches, bones, groups
 
 def make_obj(splines, patches, stamps, bones, groups):
@@ -129,10 +144,13 @@ class MDLUVPatch(object):
 
 ### Regex utilities
 
-def skip_until(regex, ls):
+def skip_until(regex, ls, guard_regex):
     while ls:
-        if regex.match(ls[0]):
-            break
+        l = ls[0]
+        if regex.match(l):
+            return True
+        elif guard_regex.match(l):
+            return False
         ls.pop(0)
 
 def gather_groups(regex, end_regex, ls):
@@ -193,7 +211,7 @@ def do_splines(mdl):
     s_re = re.compile("<SPLINE>.*")
     e_re = re.compile("</SPLINE>.*")
     rx = re.compile("\S+")
-    skip_until(s_re, mdl)
+    skip_until(s_re, mdl, re.compile("</MESH>.*"))
     while s_re.match(mdl[0]):
         mdl.pop(0)
         splines.append(gather_groups(rx, e_re, mdl))
@@ -300,8 +318,7 @@ def do_decal(mdl, res):
         stss_m = stss_re.match(l)
         iss_m = iss_re.match(l)
         if iss_m:
-            skip_until(ise_re, mdl) # avoid matching images' name attributes
-            mdl.pop(0)
+            skip_until(ise_re, mdl, de_re) # avoid matching image names
         elif n_m:
             name = n_m.group(1)
         elif stss_m:
