@@ -1,12 +1,12 @@
 bl_info = {
     "name": "Dark Engine Static Model",
     "author": "nemyax",
-    "version": (0, 3, 20160811),
+    "version": (0, 4, 20160826),
     "blender": (2, 7, 4),
     "location": "File > Import-Export",
     "description": "Import and export Dark Engine static model .bin",
     "warning": "",
-    "wiki_url": "",
+    "wiki_url": "https://sourceforge.net/p/blenderbitsbobs/wiki/Dark%20Engine%20model%20importer-exporter/",
     "tracker_url": "",
     "category": "Import-Export"}
 
@@ -21,6 +21,7 @@ import glob
 from struct import pack, unpack
 from bpy.props import (
     StringProperty,
+    EnumProperty,
     BoolProperty)
 from bpy_extras.io_utils import (
     ExportHelper,
@@ -1021,10 +1022,36 @@ def get_mesh(obj, materials): # and tweak materials
                 c[uvs].uv[1] = 1.0 - c[uvs].uv[1]
     return bm
 
+# def append_bmesh(bm1, bm2, matrix):
+    # bm2.transform(matrix)
+    # uvs = bm1.loops.layers.uv.verify()
+    # uvs_orig = bm2.loops.layers.uv.verify()
+    # vs_so_far = len(bm1.verts)
+    # for v in bm2.verts:
+        # bm1.verts.new(v.co)
+        # bm1.verts.index_update()
+    # for f in bm2.faces:
+        # try:
+            # bm1.verts.ensure_lookup_table()
+            # bm1.faces.ensure_lookup_table()
+            # nf = bm1.faces.new(
+                # [bm1.verts[vs_so_far+v.index] for v in f.verts])
+        # except ValueError:
+            # continue
+        # for i in range(len(f.loops)):
+            # nf.loops[i][uvs].uv = f.loops[i][uvs_orig].uv
+            # nf.material_index = f.material_index
+        # bm1.faces.index_update()
+    # bm2.free()
+    # bm1.normal_update()
+    # return bm1
+
 def append_bmesh(bm1, bm2, matrix):
     bm2.transform(matrix)
     uvs = bm1.loops.layers.uv.verify()
     uvs_orig = bm2.loops.layers.uv.verify()
+    ord = bm1.faces.layers.int.verify()
+    ord_orig = bm2.faces.layers.int.verify()
     vs_so_far = len(bm1.verts)
     for v in bm2.verts:
         bm1.verts.new(v.co)
@@ -1035,6 +1062,7 @@ def append_bmesh(bm1, bm2, matrix):
             bm1.faces.ensure_lookup_table()
             nf = bm1.faces.new(
                 [bm1.verts[vs_so_far+v.index] for v in f.verts])
+            nf[ord] = f[ord_orig]
         except ValueError:
             continue
         for i in range(len(f.loops)):
@@ -1043,14 +1071,11 @@ def append_bmesh(bm1, bm2, matrix):
         bm1.faces.index_update()
     bm2.free()
     bm1.normal_update()
-    return bm1
 
 def combine_meshes(bms, matrices):
     result = bmesh.new()
-    for bmi in range(len(bms)):
-        bm = bms[bmi]
-        matrix = matrices[bmi]
-        result = append_bmesh(result, bm, matrix)
+    for bm, mtx in zip(bms, matrices):
+        append_bmesh(result, bm, mtx)
     return result
     
 def get_motion(obj):
@@ -1114,14 +1139,45 @@ def tag_vhots(dl):
             l[i] = (ids[name], pos)
     return dl
 
-def prep_subs(all_objs, materials, world_origin, bsp):
+def prep_vg_based_ordering(objs, bms):
+    lookup1 = {}
+    for o, oi in zip(objs, range(len(objs))):
+        for vg in o.vertex_groups:
+            n = vg.name
+            lookup1[(oi,vg.index)] = n
+    names = list(set(lookup1.values()))
+    names.sort()
+    lookup2 = dict(zip(names, range(1, len(names) + 1)))
+    for bm, bmi in zip(bms, range(len(bms))):
+        ord = bm.faces.layers.int.verify()
+        dfm = bm.verts.layers.deform.verify()
+        for f in bm.faces:
+            shared = set(f.verts[0][dfm].keys())
+            for v in f.verts[1:]:
+                shared &= set(v[dfm].keys())
+            if shared:
+                a = sorted(shared)[0]
+                if (bmi,a) in lookup1:
+                    mark = lookup2[lookup1[(bmi,a)]]
+                    f[ord] = mark
+
+def prep_subs(all_objs, materials, world_origin, sorting):
     bbox, root, gen2, gen3_plus = categorize_objs(all_objs)
     obj_lookup = {}
-    root_mesh = combine_meshes(
-        [get_mesh(o, materials) for o in root],
-        [o.matrix_world for o in root])
+    root_meshes = [get_mesh(o, materials) for o in root]
     gen2_meshes = [get_mesh(o, materials) for o in gen2]
     gen3_plus_meshes = [get_mesh(o, materials) for o in gen3_plus]
+    if sorting == 'vgs':
+        prep_vg_based_ordering(root, root_meshes)
+        for a, b in zip(gen2, gen2_meshes):
+            prep_vg_based_ordering([a], [b])
+            do_groups(b)
+        for a, b in zip(gen3_plus, gen3_plus_meshes):
+            prep_vg_based_ordering([a], [b])
+            do_groups(b)
+    root_mesh = combine_meshes(root_meshes, [o.matrix_world for o in root])
+    if sorting == 'vgs':
+        do_groups(root_mesh)
     real_bbox = find_common_bbox(
         [mu.Matrix.Identity(4)] +
         [o.matrix_world for o in gen2] +
@@ -1135,10 +1191,9 @@ def prep_subs(all_objs, materials, world_origin, bsp):
         origin_shift = mu.Matrix.Translation(
             (mu.Vector(real_bbox[max]) + mu.Vector(real_bbox[min])) * -0.5)
     root_mesh.transform(origin_shift)
-    if bsp:
-        gen2_meshes = [do_bsp(m) for m in gen2_meshes]
-        gen3_plus_meshes = [do_bsp(m) for m in gen3_plus_meshes]
-        root_mesh = do_bsp(root_mesh)
+    if sorting == 'bsp':
+        for el in gen2_meshes + gen3_plus_meshes + [root_mesh]:
+            do_bsp(el)
     root_sub = Subobject(
         root[0].name, root_mesh, mu.Matrix([[0]*4] * 4), 0, 0.0, 0.0, [])
     for ro in root:
@@ -1323,7 +1378,7 @@ def do_export(file_path, options):
         objs,
         materials,
         options['world_origin'],
-        options['bsp'])
+        options['sorting'])
     offs = OffsetWrapper()
     for s in root_sub.list_subtree():
         extend_verts(offs, s.mesh)
@@ -1371,7 +1426,27 @@ def reorder_faces(bm, order):
         bm.faces.index_update()
     bm.normal_update()
     bm0.free()
-    return bm
+
+###
+### Sorting: by vertex group
+###
+
+def do_groups(bm):
+    ord = bm.faces.layers.int.verify()
+    lookup = {}
+    ordered = []
+    for f in bm.faces:
+        mark = f[ord]
+        if mark in lookup:
+            lookup[mark].append(f.index)
+        else:
+            lookup[mark] = [f.index]
+    for k in sorted(lookup):
+        if k > 0:
+            ordered.extend(lookup[k])
+    if 0 in lookup:
+        ordered.extend(lookup[0])
+    reorder_faces(bm, ordered)
 
 ###
 ### Sorting: BSP
@@ -1471,9 +1546,8 @@ class ImportDarkBin(bpy.types.Operator, ImportHelper):
     bl_options = {'PRESET'}
     filename_ext = ".bin"
     filter_glob = StringProperty(
-        default="*.bin",
-        options={'HIDDEN'},
-        )
+        default="*.bin",    
+        options={'HIDDEN'})
     path_mode = path_reference_mode
     check_extension = True
     path_mode = path_reference_mode
@@ -1507,10 +1581,16 @@ class ExportDarkBin(bpy.types.Operator, ExportHelper):
         name="Model origin is at world origin",
         default=True,
         description="Otherwise, it is in the center of the geometry")
-    bsp = BoolProperty(
-        name="Use BSP sorting for polygons",
-        default=False,
-        description="May increase the polygon count unpredictably; use only if you need transparency support")
+    sorting = EnumProperty(
+        name="Polygon sorting method",
+        items=(
+            ("bsp","BSP","".join([
+                "May increase the polygon count unpredictably;",
+                " use only if you need transparency support"])),
+            ("vgs","By vertex group","".join([
+                "Follow the alphabetical order of vertex group names"])),
+            ("none","Don't sort","")),
+        default="vgs")
     path_mode = path_reference_mode
     check_extension = True
     path_mode = path_reference_mode
@@ -1519,7 +1599,7 @@ class ExportDarkBin(bpy.types.Operator, ExportHelper):
             'clear'       :self.clear,
             'bright'      :self.bright,
             'world_origin':self.world_origin,
-            'bsp'         :self.bsp,
+            'sorting'     :self.sorting,
             'vis_layers'  :self.vis_layers}
         msg, result = do_export(self.filepath, options)
         if result == {'CANCELLED'}:
