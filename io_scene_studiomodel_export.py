@@ -33,10 +33,10 @@ def get_ranges(marker_filter):
     markers = bpy.context.scene.timeline_markers
     starts = [m for m in markers if
         m.name.startswith(marker_filter) and
-        m.name.endswith("_start", 2)]
+        m.name.endswith("_start", 1)]
     ends = [m for m in markers if
         m.name.startswith(marker_filter) and
-        m.name.endswith("_end", 2)]
+        m.name.endswith("_end", 1)]
     if not starts or not ends:
         return {}
     return find_matches(starts, ends)
@@ -190,30 +190,11 @@ def write_qc(path, ranges):
     f.write(qc_str)
     f.close()
 
-def write_batch0(path, prerequisites, marker_filter, weighting, qc):
-    bone_lu, tx_lu, bm = prerequisites
-    write_smd_mesh(path, prerequisites, weighting)
-    ranges = get_ranges(marker_filter)
-    if ranges:
-        for r in ranges:
-            folder = os.path.dirname(path)
-            anim_file = os.path.join(folder, r + ".smd")
-            write_smd_anim(anim_file, prerequisites, ranges[r])
-    else:
-        base_file_path_end = path.rfind(".smd")
-        if base_file_path_end == -1:
-            anim_file_path = path + ".smd"
-        else:
-            anim_file_path = path[:base_file_path_end] + ".smd"
-        write_smd_anim(anim_file_path, prerequisites, None)
-    if qc:
-        write_qc(path, ranges)
-    return {'FINISHED'}
-
 def write_batch(path, prerequisites, marker_filter, weighting, qc):
     bone_lu, tx_lu, bm = prerequisites
     write_smd_mesh(path, prerequisites, weighting)
     ranges = get_ranges(marker_filter)
+    print(ranges)
     if not ranges:
         ranges = {'idle':(1,1)}
     for r in ranges:
