@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Import SMD: Valve studiomodel source format",
     "author": "nemyax",
-    "version": (0, 1, 20170315),
+    "version": (0, 1, 20170509),
     "blender": (2, 7, 8),
     "location": "File > Import-Export",
     "description": "Import Valve studiomodel sources",
@@ -81,7 +81,6 @@ def read_smd_mesh(path):
     bpy.context.scene.objects.active = mesh_o
     bpy.ops.object.mode_set(mode='EDIT')
     for m in mats:
-        bpy.ops.object.material_slot_add()
         try:
             bmat = bpy.data.materials[m]
         except KeyError:
