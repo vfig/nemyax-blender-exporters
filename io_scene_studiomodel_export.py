@@ -1,7 +1,7 @@
 bl_info = {
-    "name": "SMD: Valve studiomodel source format",
+    "name": "Export SMD: Valve studiomodel source format",
     "author": "nemyax",
-    "version": (0, 1, 20170124),
+    "version": (0, 1, 20170524),
     "blender": (2, 7, 7),
     "location": "File > Import-Export",
     "description": "Export Valve studiomodel sources",
@@ -83,7 +83,7 @@ def xf_from_rest_pose(bone, a_mtx):
             bone.bone.matrix_local
     else:
         mtx = a_mtx * bone.bone.matrix_local
-    return mtx.to_translation()[:] + mtx.to_euler()[:]
+    return mtx.to_translation()[:] + mtx.to_euler('YZX')[:]
 
 def xf_from_live_pose(bone, a_mtx):
     par = bone.parent
@@ -91,7 +91,7 @@ def xf_from_live_pose(bone, a_mtx):
         mtx = reduce_to_scale(a_mtx) * par.matrix.inverted() * bone.matrix
     else:
         mtx = a_mtx * bone.matrix
-    return mtx.to_translation()[:] + mtx.to_euler()[:]
+    return mtx.to_translation()[:] + mtx.to_euler('YZX')[:]
 
 def get_xform_items(bones, a_mtx, frame=None):
     template = "{}" + " {:.6f}" * 6 + "\n"
@@ -127,8 +127,8 @@ def get_tri_items(bm, tx_lu, weighting=False):
             entry = template.format(pb, vx, vy, vz, nx, ny, nz, u, v)
             if weighting:
                 entry += " {}".format(len(wts))
-                for k, v in wts:
-                    entry += " {} {:.6f}".format(k, v)
+                for k, val in wts:
+                    entry += " {} {:.6f}".format(k, val)
             entry += "\n"
             result.append(entry)
     return result
