@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Export SMD: Valve studiomodel source format",
     "author": "nemyax",
-    "version": (0, 1, 20170524),
+    "version": (0, 1, 20170616),
     "blender": (2, 7, 7),
     "location": "File > Import-Export",
     "description": "Export Valve studiomodel sources",
@@ -83,7 +83,7 @@ def xf_from_rest_pose(bone, a_mtx):
             bone.bone.matrix_local
     else:
         mtx = a_mtx * bone.bone.matrix_local
-    return mtx.to_translation()[:] + mtx.to_euler('YZX')[:]
+    return mtx.to_translation()[:] + mtx.to_euler()[:]
 
 def xf_from_live_pose(bone, a_mtx):
     par = bone.parent
@@ -91,7 +91,7 @@ def xf_from_live_pose(bone, a_mtx):
         mtx = reduce_to_scale(a_mtx) * par.matrix.inverted() * bone.matrix
     else:
         mtx = a_mtx * bone.matrix
-    return mtx.to_translation()[:] + mtx.to_euler('YZX')[:]
+    return mtx.to_translation()[:] + mtx.to_euler()[:]
 
 def get_xform_items(bones, a_mtx, frame=None):
     template = "{}" + " {:.6f}" * 6 + "\n"
