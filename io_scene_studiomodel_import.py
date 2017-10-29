@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Import SMD: Valve studiomodel source format",
     "author": "nemyax",
-    "version": (0, 1, 20170509),
+    "version": (0, 1, 20171029),
     "blender": (2, 7, 8),
     "location": "File > Import-Export",
     "description": "Import Valve studiomodel sources",
@@ -348,7 +348,9 @@ def skip_until(regex, ls):
 
 def bone_tree_blender(ao):
     if "smd" in [g.name.lower() for g in ao.pose.bone_groups]:
-        pbs = [b for b in ao.pose.bones if b.bone_group.name.lower() == "smd"]
+        pbs = [b for b in ao.pose.bones
+            if b.bone_group != None
+            and b.bone_group.name.lower() == "smd"]
     else:
         pbs = ao.pose.bones[:]
     return btb(None, pbs)
