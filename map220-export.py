@@ -1,12 +1,12 @@
 bl_info = {
-    "name": "MAP 220 Geometry",
+    "name": "MAP 220 Geometry Export",
     "author": "nemyax",
-    "version": (0, 1, 20180712),
+    "version": (0, 1, 20180714),
     "blender": (2, 7, 9),
     "location": "File > Import-Export",
-    "description": "Export map editor brushes based on scene geometry",
+    "description": "Export Half-Life map editor brushes based on scene geometry",
     "warning": "",
-    "wiki_url": "",
+    "wiki_url": "https://sourceforge.net/p/blenderbitsbobs/wiki/MAP%20220%20Exporter",
     "tracker_url": "",
     "category": "Import-Export"}
 
@@ -56,7 +56,6 @@ def tex_vecs_from_pts(a3d, b3d, c3d, a2d, b2d, c2d, x_res, y_res):
 def do_tri(tri, uv, pattern, tx_lookup):
     item = "{\n"
     tx_name, x_res, y_res = tx_lookup[tri.material_index]
-    print("res:", x_res, y_res)
     la, lb, lc = tri.loops
     a3d = la.vert.co
     b3d = lb.vert.co
@@ -69,7 +68,6 @@ def do_tri(tri, uv, pattern, tx_lookup):
         (ax + bx + cx) * 0.333333,
         (ay + by + cy) * 0.333333,
         (az + bz + cz) * 0.333333))
-
     sa = a3d + fl_z_vec
     sa += ((apex - sa) * 0.75)
     sb = b3d + fl_z_vec
@@ -79,7 +77,6 @@ def do_tri(tri, uv, pattern, tx_lookup):
     sax, say, saz = [round(i, 3) for i in sa]
     sbx, sby, sbz = [round(i, 3) for i in sb]
     scx, scy, scz = [round(i, 3) for i in sc]
-
     a2d = la[uv].uv
     b2d = lb[uv].uv
     c2d = lc[uv].uv
@@ -93,7 +90,6 @@ def do_tri(tri, uv, pattern, tx_lookup):
         vec1[0], vec1[1], vec1[2], vec1[3])
     coords = pattern[:66]
     texcoords = pattern[66:]
-    print(texcoords)
     fluff = texcoords.format(
         "NULL",
         -vec0[0], -vec0[1], -vec0[2], -vec0[3],
@@ -108,9 +104,6 @@ def do_tri(tri, uv, pattern, tx_lookup):
     item += fluff
     item += coords.format(cx, cy, cz, bx, by, bz, sbx, sby, sbz)
     item += fluff
-    #item += coords.format(cx, cy, cz, sbx, sby, sbz, scx, scy, scz)
-    #item += fluff
-
     item += "}\n"
     return item
 
