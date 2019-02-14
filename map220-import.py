@@ -77,9 +77,9 @@ def read_map(path):
                     mu.Vector(coords[0:3]),
                     mu.Vector(coords[3:6]),
                     mu.Vector(coords[6:9]),
-                    0.0,
-                    0.0,
-                    0.0,
+                    (0.0,0.0),
+                    (0.0,0.0),
+                    (0.0,0.0),
                     p[9])
                 bo.add_plane(po)
             brushes.append(bo)
@@ -118,7 +118,7 @@ def gather(regex, end_regex, ls):
 ### Boilerplate
 
 class ImportMap220(bpy.types.Operator, ImportHelper):
-    '''Load an Animation:Master MDL File'''
+    '''Load a Half-Life map source file as a mesh'''
     bl_idname = "import_scene.map220"
     bl_label = 'Import MAP'
     bl_options = {'PRESET'}
