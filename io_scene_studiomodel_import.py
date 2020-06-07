@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Import SMD: Valve studiomodel source format",
     "author": "nemyax",
-    "version": (0, 1, 20171130),
+    "version": (0, 1, 20200607),
     "blender": (2, 7, 8),
     "location": "File > Import-Export",
     "description": "Import Valve studiomodel sources",
@@ -93,6 +93,7 @@ def read_smd_mesh(path):
 def prep_mesh(mesh, bm):
     sharp = set()
     n_data = bm.loops.layers.string.active
+    bm.edges.index_update()
     bm.edges.ensure_lookup_table()
     for e in bm.edges:
         for v in e.verts:
@@ -156,22 +157,38 @@ def do_mesh(smd_mesh, tx_re, vert_re, e_re):
     parse_fun = parse_vert_without_weights
     if verts[0][9] != "":
         parse_fun = parse_vert_with_weights
+    uniq_vs = {}
     for i in range(len(verts)):
-        verts[i] = parse_fun(verts[i])
+        vert = parse_fun(verts[i])
+        coords = vert[:3]
+        norm = b''
+        for j in range(3, 6):
+            norm += struct.pack('<f', vert[j])
+        uv_co = vert[6:8]
+        weights = vert[8]
+        distinct = tuple(coords + weights)
+        if distinct in uniq_vs:
+            bmv = uniq_vs[distinct]
+        if distinct not in uniq_vs:
+            bmv = bm.verts.new(coords)
+            uniq_vs[distinct] = bmv
+            bm.verts.index_update()
+        verts[i] = (bmv,norm,uv_co,weights)
     grp_set = set()
     for m, i in zip(mats, range(len(mats))):
         i3 = i * 3
         vs = verts[i3:i3+3]
-        f = bm.faces.new([bm.verts.new(a[:3]) for a in vs])
+        f = bm.faces.new([a[0] for a in vs])
+        bm.faces.index_update()
         f.material_index = mat_dict[m]
-        for l, smdv in zip(f.loops, vs):
-            l[uvs].uv = smdv[6:8]
-            l[nd] = b"".join([struct.pack('<f', a) for a in smdv[3:6]])
-            ws = dict(smdv[8])
+        for l, vdata in zip(f.loops, vs):
+            norm, uv_co, weights = vdata[1:]
+            l[uvs].uv = uv_co
+            l[nd] = norm
+            ws = dict(weights)
             for a in ws:
                 l.vert[wd][a] = ws[a]
                 grp_set.add(a)
-    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=0.0001)
     mat_list = [m for m in mat_dict]
     mat_list.sort(key=lambda m: mat_dict[m])
     return grp_set, mat_list, bm
